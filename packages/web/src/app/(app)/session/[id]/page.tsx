@@ -48,6 +48,7 @@ import {
 } from "@/components/session-desktop-layout";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { useBrowserLayoutStorage } from "@/hooks/use-browser-layout-storage";
+import { focusSessionDetailsTrigger } from "@/lib/session-details-focus";
 
 type SessionState = ReturnType<typeof useSessionSocket>["sessionState"];
 
@@ -130,6 +131,7 @@ function SessionPageContent() {
 
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const detailsButtonRef = useRef<HTMLButtonElement>(null);
+  const actionsButtonRef = useRef<HTMLButtonElement>(null);
 
   // Terminal panel state
   const [terminalOpen, setTerminalOpen] = useState(() => {
@@ -152,6 +154,13 @@ function SessionPageContent() {
   const toggleDetails = useCallback(() => {
     setIsDetailsOpen((prev) => !prev);
   }, []);
+  const openMobileDetails = useCallback(() => {
+    setIsDetailsOpen(true);
+  }, []);
+  const focusDetailsTrigger = useCallback(
+    () => focusSessionDetailsTrigger(isPhone, actionsButtonRef.current, detailsButtonRef.current),
+    [isPhone]
+  );
 
   useEffect(() => {
     if (isBelowLg) return;
@@ -167,6 +176,11 @@ function SessionPageContent() {
     () => mediaArtifacts.find((artifact) => artifact.id === selectedMediaArtifactId) ?? null,
     [mediaArtifacts, selectedMediaArtifactId]
   );
+  const primaryRepo =
+    sessionState?.repositories?.[0] ??
+    (sessionState?.repoOwner && sessionState?.repoName
+      ? { repoOwner: sessionState.repoOwner, repoName: sessionState.repoName }
+      : null);
 
   const showTimelineSkeleton = events.length === 0 && (connecting || replaying);
   const resolvedDiff = useMemo(
@@ -209,9 +223,9 @@ function SessionPageContent() {
           return;
         }
       }
-      detailsButtonRef.current?.focus();
+      focusDetailsTrigger();
     });
-  }, [isBelowLg]);
+  }, [focusDetailsTrigger, isBelowLg]);
 
   const sessionWorkspace = (
     <div className="flex h-full flex-1 flex-col overflow-hidden">
@@ -249,7 +263,17 @@ function SessionPageContent() {
         connecting={connecting}
         isDetailsOpen={isDetailsOpen}
         detailsButtonRef={detailsButtonRef}
+        actionsButtonRef={actionsButtonRef}
         onToggleDetails={toggleDetails}
+        onOpenMobileDetails={openMobileDetails}
+        actions={{
+          sessionId,
+          sessionStatus: sessionState?.status ?? "created",
+          artifacts,
+          primaryRepo,
+          onArchive: handleArchive,
+          onUnarchive: handleUnarchive,
+        }}
         renameSession={renameSession}
       />
 
@@ -328,7 +352,7 @@ function SessionPageContent() {
           open={isDetailsOpen}
           onOpenChange={setIsDetailsOpen}
           isPhone={isPhone}
-          returnFocusRef={detailsButtonRef}
+          onReturnFocus={focusDetailsTrigger}
           sessionId={sessionId}
           sessionState={sessionState}
           participants={participants}
@@ -379,16 +403,11 @@ function SessionPageContent() {
       <SessionPromptComposer
         session={{
           id: sessionId,
-          status: sessionState?.status || "",
+          status: sessionState?.status ?? "created",
           artifacts,
-          primaryRepo:
-            sessionState?.repositories?.[0] ??
-            (sessionState?.repoOwner && sessionState?.repoName
-              ? { repoOwner: sessionState.repoOwner, repoName: sessionState.repoName }
-              : null),
+          primaryRepo,
           onArchive: handleArchive,
           onUnarchive: handleUnarchive,
-          onOpenDetails: () => setIsDetailsOpen(true),
         }}
         prompt={{
           value: prompt,

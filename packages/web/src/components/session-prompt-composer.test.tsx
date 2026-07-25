@@ -9,7 +9,9 @@ import { SessionPromptComposer } from "./session-prompt-composer";
 
 expect.extend(matchers);
 
-vi.mock("@/components/action-bar", () => ({ ActionBar: () => null }));
+vi.mock("@/components/action-bar", () => ({
+  ActionBar: () => <div data-testid="action-bar" />,
+}));
 vi.mock("@/components/attachment-preview-strip", () => ({
   AttachmentPreviewStrip: () => null,
 }));
@@ -45,7 +47,6 @@ function ComposerHarness({
         artifacts: [],
         onArchive: vi.fn(),
         onUnarchive: vi.fn(),
-        onOpenDetails: vi.fn(),
       }}
       prompt={{
         value,
@@ -112,5 +113,15 @@ describe("SessionPromptComposer", () => {
     expect(input).not.toHaveClass("pr-24");
     expect(input.parentElement).toHaveClass("flex-wrap", "justify-end");
     expect(actions).toHaveClass("shrink-0", "sm:absolute");
+  });
+
+  it("removes the action bar row and spacing below md", () => {
+    render(<ComposerHarness />);
+
+    expect(screen.getByTestId("action-bar").parentElement).toHaveClass(
+      "hidden",
+      "mb-3",
+      "md:block"
+    );
   });
 });

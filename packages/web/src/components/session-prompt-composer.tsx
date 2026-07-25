@@ -11,16 +11,16 @@ import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
 import { useAttachmentDropZone } from "@/hooks/use-attachment-drop-zone";
 import { ATTACHMENT_ACCEPT, type PendingAttachment } from "@/hooks/use-session-attachments";
 import type { Artifact } from "@/types/session";
+import type { SessionStatus } from "@open-inspect/shared";
 
 type SessionPromptComposerProps = {
   session: {
     id: string;
-    status: string;
+    status: SessionStatus;
     artifacts: Artifact[];
     primaryRepo?: { repoOwner: string; repoName: string } | null;
     onArchive: () => void | Promise<void>;
     onUnarchive: () => void | Promise<void>;
-    onOpenDetails: () => void;
   };
   prompt: {
     value: string;
@@ -87,7 +87,7 @@ export function SessionPromptComposer({
     <footer className="min-w-0 border-t border-border-muted flex-shrink-0">
       <form onSubmit={prompt.onSubmit} className="w-full min-w-0 max-w-4xl mx-auto p-4 pb-6">
         {/* Action bar above input */}
-        <div className="mb-3">
+        <div className="hidden mb-3 md:block">
           <ActionBar
             sessionId={session.id}
             sessionStatus={session.status}
@@ -95,7 +95,6 @@ export function SessionPromptComposer({
             primaryRepo={session.primaryRepo}
             onArchive={session.onArchive}
             onUnarchive={session.onUnarchive}
-            onOpenDetails={session.onOpenDetails}
           />
         </div>
 
