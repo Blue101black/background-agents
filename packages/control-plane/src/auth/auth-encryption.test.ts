@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { OAuthFlowVerifierIntegrityError } from "./oauth-flow-verifier";
+import { ProviderCredentialIntegrityError } from "./provider-credential-cipher";
 import {
   InvalidAuthEncryptionRootError,
+  ProviderCredentialCipher,
   ProviderPkceFlowCipher,
   UnsupportedAuthEncryptionVersionError,
   deriveAuthEncryptionKeyBytes,
@@ -12,7 +14,7 @@ const ROOT_KEY_BASE64 = Buffer.from(
   "hex"
 ).toString("base64");
 
-describe("terminal auth encryption key derivation", () => {
+describe("browser auth encryption key derivation", () => {
   it("derives stable, purpose-separated v1 keys from the configured root", async () => {
     const providerKey = await deriveAuthEncryptionKeyBytes(
       ROOT_KEY_BASE64,
@@ -70,6 +72,7 @@ describe("ProviderPkceFlowCipher", () => {
 
     const encrypted = await cipher.encrypt("provider-pkce-verifier", context);
 
+    expect(encrypted).toBe("AAECAwQFBgcICQoLU7ir/zg3qDSh4hffgBH4d57nSJPZYWPWIpEfJ+mJY7P039F+Idk=");
     expect(Buffer.from(encrypted, "base64").subarray(0, initializationVector.byteLength)).toEqual(
       Buffer.from(initializationVector)
     );
@@ -88,5 +91,53 @@ describe("ProviderPkceFlowCipher", () => {
         keyVersion: 1,
       })
     ).rejects.toThrow("Provider PKCE flow IV generator returned an invalid IV");
+  });
+});
+
+describe("ProviderCredentialCipher", () => {
+  it("binds ciphertext to its identity, shape, token role, and row version", async () => {
+    const initializationVector = Uint8Array.from({ length: 12 }, (_, index) => index);
+    const cipher = new ProviderCredentialCipher(ROOT_KEY_BASE64, {
+      ivGenerator: { generate: () => initializationVector },
+    });
+    const binding = {
+      providerIdentityId: "identity-1",
+      credentialKind: "refreshable" as const,
+      tokenRole: "access" as const,
+      encryptionKeyVersion: 1,
+      rowVersion: 3,
+    };
+    const encrypted = await cipher.encrypt("provider-access-token", binding);
+
+    expect(encrypted).toBe("AAECAwQFBgcICQoLiRyTliBzKgjV8xzRi0vqSQPLGq0sVzWGmPuFl+yGTHHBQtlqZQ==");
+    await expect(cipher.decrypt(encrypted, binding)).resolves.toBe("provider-access-token");
+    await expect(
+      cipher.decrypt(encrypted, { ...binding, providerIdentityId: "identity-2" })
+    ).rejects.toBeInstanceOf(ProviderCredentialIntegrityError);
+    await expect(
+      cipher.decrypt(encrypted, { ...binding, credentialKind: "access_only_expiring" })
+    ).rejects.toBeInstanceOf(ProviderCredentialIntegrityError);
+    await expect(
+      cipher.decrypt(encrypted, { ...binding, tokenRole: "refresh" })
+    ).rejects.toBeInstanceOf(ProviderCredentialIntegrityError);
+    await expect(cipher.decrypt(encrypted, { ...binding, rowVersion: 4 })).rejects.toBeInstanceOf(
+      ProviderCredentialIntegrityError
+    );
+  });
+
+  it("rejects an invalid initialization-vector length", async () => {
+    const cipher = new ProviderCredentialCipher(ROOT_KEY_BASE64, {
+      ivGenerator: { generate: () => new Uint8Array(11) },
+    });
+
+    await expect(
+      cipher.encrypt("provider-access-token", {
+        providerIdentityId: "identity-1",
+        credentialKind: "access_only_nonexpiring",
+        tokenRole: "access",
+        encryptionKeyVersion: 1,
+        rowVersion: 1,
+      })
+    ).rejects.toThrow("Provider credential IV generator returned an invalid IV");
   });
 });

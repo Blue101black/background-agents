@@ -1,7 +1,13 @@
 import {
   OAuthFlowVerifierIntegrityError,
   type OAuthFlowVerifierBinding,
+  type OAuthFlowVerifierCipher,
 } from "./oauth-flow-verifier";
+import {
+  ProviderCredentialIntegrityError,
+  type ProviderCredentialCipherBinding,
+  type ProviderCredentialCipherPort,
+} from "./provider-credential-cipher";
 
 export type AuthEncryptionPurpose = "provider_credentials" | "provider_pkce_flow";
 
@@ -87,73 +93,81 @@ function encodeCiphertext(iv: Uint8Array, ciphertext: ArrayBuffer): string {
   return btoa(String.fromCharCode(...combined));
 }
 
-function decodeCiphertext(value: string): { iv: Uint8Array; ciphertext: Uint8Array } {
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new OAuthFlowVerifierIntegrityError();
-  }
-
+function decodeCiphertext(
+  value: string,
+  integrityError: () => Error
+): { iv: Uint8Array; ciphertext: Uint8Array } {
   try {
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+      throw new Error("Ciphertext is not canonical base64");
+    }
     const combined = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
     if (combined.byteLength <= AES_GCM_IV_BYTES + AES_GCM_TAG_BYTES) {
-      throw new OAuthFlowVerifierIntegrityError();
+      throw new Error("Ciphertext is too short");
     }
     return {
       iv: combined.slice(0, AES_GCM_IV_BYTES),
       ciphertext: combined.slice(AES_GCM_IV_BYTES),
     };
-  } catch (error) {
-    if (error instanceof OAuthFlowVerifierIntegrityError) throw error;
-    throw new OAuthFlowVerifierIntegrityError();
+  } catch {
+    throw integrityError();
   }
 }
 
-export class ProviderPkceFlowCipher {
+interface AesGcmPurposeCipherOptions<Binding> {
+  readonly rootKeyBase64: string;
+  readonly purpose: AuthEncryptionPurpose;
+  readonly associatedData: (binding: Binding) => Uint8Array;
+  readonly keyVersion: (binding: Binding) => number;
+  readonly integrityError: () => Error;
+  readonly invalidIvError: () => Error;
+  readonly ivGenerator?: InitializationVectorGenerator;
+}
+
+class AesGcmPurposeCipher<Binding> {
   private readonly keys = new Map<number, Promise<CryptoKey>>();
   private readonly ivGenerator: InitializationVectorGenerator;
 
-  constructor(
-    private readonly rootKeyBase64: string,
-    dependencies: { readonly ivGenerator?: InitializationVectorGenerator } = {}
-  ) {
-    this.ivGenerator = dependencies.ivGenerator ?? {
+  constructor(private readonly options: AesGcmPurposeCipherOptions<Binding>) {
+    this.ivGenerator = options.ivGenerator ?? {
       generate: () => crypto.getRandomValues(new Uint8Array(AES_GCM_IV_BYTES)),
     };
   }
 
-  async encrypt(plaintext: string, context: OAuthFlowVerifierBinding): Promise<string> {
+  async encrypt(plaintext: string, binding: Binding): Promise<string> {
     const iv = this.ivGenerator.generate();
     if (iv.byteLength !== AES_GCM_IV_BYTES) {
-      throw new Error("Provider PKCE flow IV generator returned an invalid IV");
+      throw this.options.invalidIvError();
     }
     const ciphertext = await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
         iv,
-        additionalData: providerPkceFlowAssociatedData(context),
+        additionalData: this.options.associatedData(binding),
       },
-      await this.getKey(context.keyVersion),
+      await this.getKey(this.options.keyVersion(binding)),
       new TextEncoder().encode(plaintext)
     );
     return encodeCiphertext(iv, ciphertext);
   }
 
-  async decrypt(encrypted: string, context: OAuthFlowVerifierBinding): Promise<string> {
-    const { iv, ciphertext } = decodeCiphertext(encrypted);
+  async decrypt(encrypted: string, binding: Binding): Promise<string> {
+    const { iv, ciphertext } = decodeCiphertext(encrypted, this.options.integrityError);
     try {
       const plaintext = await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
           iv,
-          additionalData: providerPkceFlowAssociatedData(context),
+          additionalData: this.options.associatedData(binding),
         },
-        await this.getKey(context.keyVersion),
+        await this.getKey(this.options.keyVersion(binding)),
         ciphertext
       );
       return new TextDecoder().decode(plaintext);
     } catch (error) {
       if (error instanceof UnsupportedAuthEncryptionVersionError) throw error;
       if (error instanceof InvalidAuthEncryptionRootError) throw error;
-      throw new OAuthFlowVerifierIntegrityError();
+      throw this.options.integrityError();
     }
   }
 
@@ -162,8 +176,8 @@ export class ProviderPkceFlowCipher {
     if (existing) return existing;
 
     const derived = deriveAuthEncryptionKeyBytes(
-      this.rootKeyBase64,
-      "provider_pkce_flow",
+      this.options.rootKeyBase64,
+      this.options.purpose,
       version
     ).then((bytes) =>
       crypto.subtle.importKey("raw", bytes, { name: "AES-GCM", length: 256 }, false, [
@@ -173,5 +187,72 @@ export class ProviderPkceFlowCipher {
     );
     this.keys.set(version, derived);
     return derived;
+  }
+}
+
+export class ProviderPkceFlowCipher implements OAuthFlowVerifierCipher {
+  private readonly cipher: AesGcmPurposeCipher<OAuthFlowVerifierBinding>;
+
+  constructor(
+    rootKeyBase64: string,
+    dependencies: { readonly ivGenerator?: InitializationVectorGenerator } = {}
+  ) {
+    this.cipher = new AesGcmPurposeCipher({
+      rootKeyBase64,
+      purpose: "provider_pkce_flow",
+      associatedData: providerPkceFlowAssociatedData,
+      keyVersion: (binding) => binding.keyVersion,
+      integrityError: () => new OAuthFlowVerifierIntegrityError(),
+      invalidIvError: () => new Error("Provider PKCE flow IV generator returned an invalid IV"),
+      ivGenerator: dependencies.ivGenerator,
+    });
+  }
+
+  encrypt(plaintext: string, context: OAuthFlowVerifierBinding): Promise<string> {
+    return this.cipher.encrypt(plaintext, context);
+  }
+
+  decrypt(encrypted: string, context: OAuthFlowVerifierBinding): Promise<string> {
+    return this.cipher.decrypt(encrypted, context);
+  }
+}
+
+function providerCredentialAssociatedData(context: ProviderCredentialCipherBinding): Uint8Array {
+  return new TextEncoder().encode(
+    JSON.stringify([
+      "provider_credentials",
+      context.providerIdentityId,
+      context.credentialKind,
+      context.tokenRole,
+      context.encryptionKeyVersion,
+      context.rowVersion,
+    ])
+  );
+}
+
+export class ProviderCredentialCipher implements ProviderCredentialCipherPort {
+  private readonly cipher: AesGcmPurposeCipher<ProviderCredentialCipherBinding>;
+
+  constructor(
+    rootKeyBase64: string,
+    dependencies: { readonly ivGenerator?: InitializationVectorGenerator } = {}
+  ) {
+    this.cipher = new AesGcmPurposeCipher({
+      rootKeyBase64,
+      purpose: "provider_credentials",
+      associatedData: providerCredentialAssociatedData,
+      keyVersion: (binding) => binding.encryptionKeyVersion,
+      integrityError: () => new ProviderCredentialIntegrityError(),
+      invalidIvError: () => new Error("Provider credential IV generator returned an invalid IV"),
+      ivGenerator: dependencies.ivGenerator,
+    });
+  }
+
+  encrypt(plaintext: string, context: ProviderCredentialCipherBinding): Promise<string> {
+    return this.cipher.encrypt(plaintext, context);
+  }
+
+  decrypt(encrypted: string, context: ProviderCredentialCipherBinding): Promise<string> {
+    return this.cipher.decrypt(encrypted, context);
   }
 }
