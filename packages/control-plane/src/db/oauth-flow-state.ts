@@ -4,6 +4,11 @@ import {
   type OAuthFlowVerifierBinding,
   type OAuthFlowVerifierCipher,
 } from "../auth/oauth-flow-verifier";
+import type {
+  ConsumedOAuthFlowState,
+  ConsumedOAuthFlowStateFor,
+  CreateOAuthFlowStateInput,
+} from "../auth/oauth-flow-state";
 import { isSignInProvider, type SignInProvider } from "../auth/sign-in-provider";
 import type { Clock, TokenHasher } from "./browser-auth-sessions";
 import type { SqlDatabase } from "./sql-database";
@@ -18,42 +23,6 @@ export interface OAuthFlowStateStoreDependencies {
   readonly idGenerator: { generate(): string };
   readonly tokenHasher: TokenHasher;
 }
-
-interface OAuthFlowStateInputBinding {
-  state: string;
-  clientId: "web";
-  redirectUri: string;
-  clientCodeChallenge: string;
-  providerPkceVerifier: string;
-}
-
-export type CreateOAuthFlowStateInput =
-  | (OAuthFlowStateInputBinding & {
-      provider: "github";
-      oidcNonce?: never;
-    })
-  | (OAuthFlowStateInputBinding & {
-      provider: "google";
-      oidcNonce: string;
-    });
-
-interface ConsumedOAuthFlowStateBinding {
-  flowId: string;
-  clientId: "web";
-  redirectUri: string;
-  clientCodeChallenge: string;
-  providerPkceVerifier: string;
-}
-
-export type ConsumedOAuthFlowState =
-  | (ConsumedOAuthFlowStateBinding & {
-      provider: "github";
-      oidcNonceHash: null;
-    })
-  | (ConsumedOAuthFlowStateBinding & {
-      provider: "google";
-      oidcNonceHash: string;
-    });
 
 interface OAuthFlowRowBinding {
   id: string;
@@ -229,7 +198,10 @@ export class OAuthFlowStateStore {
     return { flowId };
   }
 
-  async consume(state: string, expectedProvider: SignInProvider): Promise<ConsumedOAuthFlowState> {
+  async consume<P extends SignInProvider>(
+    state: string,
+    expectedProvider: P
+  ): Promise<ConsumedOAuthFlowStateFor<P>> {
     if (!OPAQUE_VALUE_PATTERN.test(state)) {
       throw new OAuthFlowStateConsumptionError("malformed");
     }
@@ -296,13 +268,16 @@ export class OAuthFlowStateStore {
       clientCodeChallenge: row.clientCodeChallenge,
       providerPkceVerifier,
     };
-    return row.provider === "github"
-      ? { ...consumedBinding, provider: "github", oidcNonceHash: null }
-      : {
-          ...consumedBinding,
-          provider: "google",
-          oidcNonceHash: row.oidcNonceHash,
-        };
+    const result: ConsumedOAuthFlowState =
+      row.provider === "github"
+        ? { ...consumedBinding, provider: "github", oidcNonceHash: null }
+        : {
+            ...consumedBinding,
+            provider: "google",
+            oidcNonceHash: row.oidcNonceHash,
+          };
+    // The provider equality check above establishes the generic correlation.
+    return result as ConsumedOAuthFlowStateFor<P>;
   }
 
   private async throwCurrentRejection(flowId: string, now: number): Promise<never> {

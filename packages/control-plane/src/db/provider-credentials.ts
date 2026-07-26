@@ -2,8 +2,8 @@ import {
   ProviderCredentialIntegrityError,
   type ProviderCredentialCipherBinding,
   type ProviderCredentialCipherPort,
-  type ProviderCredentialKind,
 } from "../auth/provider-credential-cipher";
+import type { ProviderCredentialInput, ProviderCredentialKind } from "../auth/provider-credential";
 import type { Clock } from "./browser-auth-sessions";
 import { isUniqueConstraintError } from "./errors";
 import type { SqlDatabase, SqlStatement } from "./sql-database";
@@ -13,24 +13,6 @@ const SUPPORTED_PROVIDER_CREDENTIAL_ENCRYPTION_KEY_VERSIONS: ReadonlySet<number>
   CURRENT_PROVIDER_CREDENTIAL_ENCRYPTION_KEY_VERSION,
 ]);
 const MAX_SIGN_IN_UPSERT_ATTEMPTS = 4;
-
-export type ProviderCredentialInput =
-  | {
-      kind: "refreshable";
-      accessToken: string;
-      accessExpiresAt: number;
-      refreshToken: string;
-      refreshExpiresAt: number | null;
-    }
-  | {
-      kind: "access_only_expiring";
-      accessToken: string;
-      accessExpiresAt: number;
-    }
-  | {
-      kind: "access_only_nonexpiring";
-      accessToken: string;
-    };
 
 interface ProviderCredentialMetadata {
   providerIdentityId: string;

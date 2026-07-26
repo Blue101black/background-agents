@@ -1,7 +1,4 @@
-export type ProviderCredentialKind =
-  | "refreshable"
-  | "access_only_expiring"
-  | "access_only_nonexpiring";
+import type { ProviderCredentialKind } from "./provider-credential";
 
 export interface ProviderCredentialCipherBinding {
   providerIdentityId: string;
