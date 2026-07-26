@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ProviderCredentialCipher } from "../../src/auth/auth-encryption";
 import type { ProviderCredentialCipherPort } from "../../src/auth/provider-credential-cipher";
 import {
+  PROVIDER_CREDENTIAL_ROW_VERSION_CHECK,
   ProviderCredentialStore,
   ProviderCredentialVersionConflictError,
   StoredProviderCredentialCorruptError,
@@ -38,6 +39,21 @@ describe("ProviderCredentialStore", () => {
     store = new ProviderCredentialStore(env.DB, new ProviderCredentialCipher(ROOT_KEY_BASE64), {
       now: () => NOW_MS,
     });
+  });
+
+  it("pins the row-version check used to detect stale sign-in writes", async () => {
+    await expect(
+      env.DB.prepare(
+        `INSERT INTO provider_credentials (
+           provider_identity_id, credential_kind,
+           access_token_ciphertext, access_expires_at,
+           refresh_token_ciphertext, refresh_expires_at,
+           encryption_key_version, row_version, updated_at
+         ) VALUES (?, 'access_only_nonexpiring', ?, NULL, NULL, NULL, 1, 0, ?)`
+      )
+        .bind("identity-1", "ciphertext", NOW_MS)
+        .run()
+    ).rejects.toThrow(`CHECK constraint failed: ${PROVIDER_CREDENTIAL_ROW_VERSION_CHECK}`);
   });
 
   it("round-trips refreshable credentials without storing plaintext tokens", async () => {
@@ -231,6 +247,41 @@ describe("ProviderCredentialStore", () => {
       providerIdentityId: "identity-2",
       accessToken: "new-identity-access-token",
       rowVersion: 1,
+    });
+  });
+
+  it("makes a stale prepared sign-in mutation fail its caller-owned batch atomically", async () => {
+    await store.upsertFromSignIn("identity-1", {
+      kind: "access_only_nonexpiring",
+      accessToken: "initial-access-token",
+    });
+    const staleCredentialMutation = await store.prepareSignInUpsert("identity-1", {
+      kind: "access_only_nonexpiring",
+      accessToken: "stale-sign-in-token",
+    });
+    await store.upsertFromSignIn("identity-1", {
+      kind: "access_only_nonexpiring",
+      accessToken: "concurrent-sign-in-token",
+    });
+
+    let rejection: unknown;
+    try {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE users SET display_name = 'must-roll-back' WHERE id = 'user-1'"),
+        staleCredentialMutation,
+      ]);
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect(store.isSignInVersionConflict(rejection)).toBe(true);
+    await expect(
+      env.DB.prepare("SELECT display_name FROM users WHERE id = 'user-1'").first()
+    ).resolves.toEqual({ display_name: null });
+    await expect(store.get("identity-1")).resolves.toMatchObject({
+      accessToken: "concurrent-sign-in-token",
+      rowVersion: 2,
     });
   });
 
