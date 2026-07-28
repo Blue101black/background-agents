@@ -7,7 +7,6 @@ import {
   type BrowserAuthSessionUser,
 } from "./browser-auth-session-contract";
 import { browserApiFetch } from "./browser-api-fetch";
-import type { AuthProvider } from "./build-auth-identity";
 
 const BROWSER_AUTH_SESSION_PATH = "/api/auth/get-session";
 
@@ -17,7 +16,7 @@ export interface AuthSession {
   user: AuthSessionUser;
 }
 
-export type SignInProvider = AuthProvider;
+export type SignInProvider = "github" | "google";
 
 export type AuthSessionState =
   | {
@@ -28,8 +27,6 @@ export type AuthSessionState =
       data: null;
       status: "loading" | "unauthenticated";
     };
-
-export type AuthSessionStatus = AuthSessionState["status"];
 
 export async function signIn(provider: SignInProvider): Promise<void> {
   const response = await browserApiFetch("/api/auth/sign-in/social", {
