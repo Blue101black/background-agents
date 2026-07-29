@@ -171,19 +171,16 @@ export function SidebarLayout({ children }: SidebarLayoutProps) {
   return (
     <SidebarContext.Provider value={sidebar}>
       <AppShellActionsContext.Provider value={appShellActions}>
-        <div className="flex h-dvh overflow-hidden">
-          {isMobile && !sidebar.isOpen && (
-            <div
-              data-testid="mobile-sidebar-drag-handle"
-              className="fixed inset-y-0 left-0 z-50 w-5 touch-pan-y"
-              aria-hidden="true"
-              onPointerDown={sidebarPull.handlePointerDown}
-              onPointerMove={sidebarPull.handlePointerMove}
-              onPointerUp={sidebarPull.handlePointerUp}
-              onPointerCancel={sidebarPull.reset}
-              onContextMenu={(event) => event.preventDefault()}
-            />
-          )}
+        <div
+          data-testid="mobile-sidebar-gesture-boundary"
+          className={`flex h-dvh overflow-hidden ${
+            isMobile && !sidebar.isOpen ? "touch-pan-y" : ""
+          }`}
+          onPointerDownCapture={sidebarPull.handlePointerDown}
+          onPointerMoveCapture={sidebarPull.handlePointerMove}
+          onPointerUpCapture={sidebarPull.handlePointerUp}
+          onPointerCancelCapture={sidebarPull.handlePointerCancel}
+        >
           {/* Mobile: overlay backdrop */}
           {isMobile && (
             <div
