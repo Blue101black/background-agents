@@ -199,6 +199,23 @@ export function postMessage(
   });
 }
 
+export function postBlocks(
+  token: string,
+  channel: string,
+  blocks: unknown[],
+  options?: {
+    thread_ts?: string;
+    reply_broadcast?: boolean;
+  }
+): Promise<SlackEnvelope<{ channel: string; ts: string }>> {
+  return slackPost(token, "chat.postMessage", {
+    channel,
+    blocks,
+    thread_ts: options?.thread_ts,
+    reply_broadcast: options?.reply_broadcast,
+  });
+}
+
 export function getPermalink(
   token: string,
   channel: string,
