@@ -10,6 +10,10 @@ locals {
   # declaration. Runtime validation mirrors these plan-time invariants.
   github_oauth_enabled = trimspace(var.github_client_id) != "" && trimspace(var.github_client_secret) != ""
   google_enabled       = trimspace(var.google_client_id) != "" && trimspace(var.google_client_secret) != ""
+  enabled_sign_in_providers = concat(
+    local.github_oauth_enabled ? ["github"] : [],
+    local.google_enabled ? ["google"] : [],
+  )
 
   provider_neutral_admission_enabled = (
     length([for item in split(",", var.allowed_email_domains) : trimspace(item) if trimspace(item) != ""]) > 0 ||
@@ -54,6 +58,9 @@ locals {
   web_app_url = (var.web_platform == "cloudflare"
     ? "https://${local.web_cloudflare_host}"
     : "https://open-inspect-${local.name_suffix}.vercel.app"
+  )
+  effective_web_app_url = (
+    var.web_platform == "vercel" ? module.web_app[0].production_url : local.web_app_url
   )
 
   # Worker script paths (deterministic output locations)
