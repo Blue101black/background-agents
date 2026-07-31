@@ -1,11 +1,19 @@
 """Provider-session lifecycle tests for Modal image-build sandboxes."""
 
+import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.sandbox.build_session import BuildSessionNotFoundError, ModalBuildSessionService
+from src.sandbox.build_session import (
+    DEFAULT_BUILD_TIMEOUT_SECONDS,
+    MAX_BUILD_TIMEOUT_SECONDS,
+    BuildSessionNotFoundError,
+    ModalBuildSessionService,
+)
 from src.sandbox.manager import SNAPSHOT_FILESYSTEM_TIMEOUT_SECONDS
 
 
@@ -15,8 +23,26 @@ def _async_method(return_value=None):
     return method
 
 
+@pytest.mark.parametrize(
+    ("constant_name", "python_value"),
+    [
+        ("DEFAULT_BUILD_TIMEOUT_SECONDS", DEFAULT_BUILD_TIMEOUT_SECONDS),
+        ("MAX_BUILD_TIMEOUT_SECONDS", MAX_BUILD_TIMEOUT_SECONDS),
+    ],
+)
+def test_build_timeout_limits_match_shared_contract(constant_name, python_value):
+    """Keep Modal's runtime limits aligned with the shared TypeScript contract."""
+    shared_source = (
+        Path(__file__).resolve().parents[2] / "shared" / "src" / "types" / "integrations.ts"
+    ).read_text()
+    match = re.search(rf"export\s+const\s+{constant_name}\s*=\s*(\d+)\s*;", shared_source)
+
+    assert match is not None, f"missing numeric shared constant: {constant_name}"
+    assert python_value == int(match.group(1))
+
+
 @pytest.mark.asyncio
-async def test_create_provider_session_build_is_dormant_tagged_and_scrubs_callbacks(monkeypatch):
+async def test_create_build_sandbox_is_dormant_tagged_and_scrubs_callback_env(monkeypatch):
     sandbox = SimpleNamespace(object_id="modal-session-1")
     create = _async_method(sandbox)
     monkeypatch.setattr("src.sandbox.build_session.modal.Sandbox.create", create)
@@ -54,15 +80,26 @@ async def test_create_provider_session_build_is_dormant_tagged_and_scrubs_callba
     assert kwargs["env"]["VCS_HOST"] == "gitlab.com"
     assert kwargs["env"]["VCS_CLONE_USERNAME"] == "oauth2"
     assert kwargs["env"]["VCS_CLONE_TOKEN"] == "clone-token"
+    assert json.loads(kwargs["env"]["SESSION_CONFIG"]) == {
+        "branch": "main",
+        "repositories": [{"repo_owner": "acme", "repo_name": "repo", "branch": "main"}],
+    }
+    assert kwargs["secrets"] == []
+    assert kwargs["timeout"] == 1800
+    assert kwargs["workdir"] == "/workspace"
 
 
 @pytest.mark.asyncio
-async def test_start_build_verifies_tags_and_injects_exact_callback_identity(monkeypatch):
+async def test_start_build_sandbox_verifies_tags_and_injects_exact_callback_env(monkeypatch):
+    process = SimpleNamespace(object_id="process-1")
     sandbox = SimpleNamespace(
         get_tags=_async_method(
-            {"openinspect_kind": "image-build", "openinspect_build_id": "build-1"}
+            {
+                "openinspect_kind": "image-build",
+                "openinspect_build_id": "build-1",
+            }
         ),
-        exec=_async_method(),
+        exec=_async_method(process),
     )
     monkeypatch.setattr("src.sandbox.build_session.modal.Sandbox.from_id", lambda _id: sandbox)
 
@@ -74,6 +111,11 @@ async def test_start_build_verifies_tags_and_injects_exact_callback_identity(mon
         callback_token="callback-token",
     )
 
+    assert sandbox.exec.aio.await_args.args == (
+        "python",
+        "-m",
+        "sandbox_runtime.entrypoint",
+    )
     assert sandbox.exec.aio.await_args.kwargs["env"] == {
         "OI_REPO_IMAGE_BUILD_ID": "build-1",
         "OI_REPO_IMAGE_CALLBACK_URL": "https://cp.test/image-builds/build-complete",
@@ -85,10 +127,13 @@ async def test_start_build_verifies_tags_and_injects_exact_callback_identity(mon
 
 
 @pytest.mark.asyncio
-async def test_start_build_refuses_mismatched_tags(monkeypatch):
+async def test_start_build_sandbox_refuses_mismatched_tags(monkeypatch):
     sandbox = SimpleNamespace(
         get_tags=_async_method(
-            {"openinspect_kind": "interactive", "openinspect_build_id": "other-build"}
+            {
+                "openinspect_kind": "interactive",
+                "openinspect_build_id": "other-build",
+            }
         ),
         exec=_async_method(),
     )
@@ -128,10 +173,35 @@ async def test_snapshot_build_awaits_async_snapshot_operation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_terminate_build_treats_not_found_as_success(monkeypatch):
+async def test_terminate_build_sandbox_verifies_tags(monkeypatch):
+    sandbox = SimpleNamespace(
+        get_tags=_async_method(
+            {
+                "openinspect_kind": "image-build",
+                "openinspect_build_id": "build-1",
+            }
+        ),
+        terminate=_async_method(),
+    )
+    monkeypatch.setattr("src.sandbox.build_session.modal.Sandbox.from_id", lambda _id: sandbox)
+
+    await ModalBuildSessionService().terminate(
+        build_id="build-1",
+        provider_session_id="modal-session-1",
+        reason="image_build_complete",
+    )
+
+    sandbox.terminate.aio.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_terminate_build_sandbox_treats_provider_not_found_as_success(monkeypatch):
     from modal.exception import NotFoundError
 
-    sandbox = SimpleNamespace(get_tags=_async_method(), terminate=_async_method())
+    sandbox = SimpleNamespace(
+        get_tags=_async_method(),
+        terminate=_async_method(),
+    )
     sandbox.get_tags.aio.side_effect = NotFoundError("sandbox no longer exists")
     monkeypatch.setattr("src.sandbox.build_session.modal.Sandbox.from_id", lambda _id: sandbox)
 
