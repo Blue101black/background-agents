@@ -123,8 +123,37 @@ The build process runs the same setup steps that a normal session would:
 1. Clones every repository in the scope at its base branch (for an environment, **sequentially, in
    position order**)
 2. Runs each repository's `.openinspect/setup.sh` script (if present) in the same order
-3. Calls the control plane with the exact provider sandbox id
-4. Lets the control plane snapshot or checkpoint that sandbox into the provider image artifact
+3. Calls the control plane with the exact bound provider session id
+4. Lets a durable Queue consumer save the provider image artifact and terminate the build session
+
+```mermaid
+flowchart TD
+    trigger[Build trigger] --> register[Register building row and callback token]
+    register --> create[Create dormant provider session]
+    create --> bind[Persist the provider session id]
+    bind --> run[Start runtime: clone repositories and run setup]
+
+    run -->|success callback| accept[Authenticate and persist completion metadata]
+    run -->|failure callback| fail[Authenticate and persist failed state]
+    accept --> publish[Publish secret-free Queue command]
+    fail --> publish
+
+    publish --> state{Accepted build state}
+    state -->|success: building| lease{D1 finalization lease available?}
+    state -->|failure: failed| cleanup[Terminate provider session]
+    lease -->|no| retry[Retry after the active lease]
+    retry --> lease
+    lease -->|yes| artifact[Snapshot or checkpoint provider session]
+
+    artifact --> fence[Fence provider artifact id in D1]
+    fence --> ready[Mark image ready or superseded]
+    ready --> cleanup
+    cleanup --> done[Clear cleanup obligation]
+
+    artifact -->|definitely no artifact created| retry
+    artifact -->|outcome ambiguous| terminal[Mark failed; do not create again]
+    terminal --> cleanup
+```
 
 A failing setup script fails the whole build, and for environment builds the error names the
 repository. Build-time secrets are exactly what the scope's sessions get: global + repository
@@ -135,10 +164,21 @@ Everything your setup scripts install — dependencies, build artifacts, caches 
 image artifact. Depending on the active sandbox provider, this is stored as a Modal image, Vercel
 snapshot, or OpenComputer checkpoint.
 
-Modal follows the same provider-session lifecycle as Vercel and OpenComputer: the control plane
-creates a dormant sandbox, records its id, starts the runtime, and snapshots it after the success
-callback. The legacy Modal builder remains deployed temporarily so builds already in flight can
-finish during the rollout, but new builds do not use it.
+The configured build timeout covers clone and setup execution. Build sandboxes receive an additional
+ten minutes for callback delivery and snapshot/checkpoint finalization. Because Vercel limits
+sandbox lifetime to 45 minutes, Vercel image-build execution is capped at 35 minutes so that reserve
+is never lost; Modal and OpenComputer continue to honor the configured execution timeout up to the
+shared one-hour limit.
+
+Modal follows the same lifecycle as the other providers: the control plane creates a dormant
+sandbox, records its id, starts the runtime, and snapshots it only after the callback has been
+durably accepted. New builds no longer invoke the long-running Modal `build_image` function; the
+legacy function and cron remain deployed only until the final cleanup step in the rollout.
+
+Terraform deploys the Modal app before the control-plane Worker so a one-shot upgrade cannot expose
+the new Worker until Modal's provider-session endpoints are available. The repository history keeps
+that cutover reviewable as three changes: add the compatible Modal endpoints, switch the Worker to
+Queue finalization, then remove the legacy Modal builder.
 
 ### What Happens When You Start a Session
 

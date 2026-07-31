@@ -7,6 +7,7 @@
 import { handleRequest } from "./router";
 import { createLogger } from "./logger";
 import type { Env } from "./types";
+import { consumeImageBuildFinalizations } from "./image-builds/finalization-consumer";
 
 const logger = createLogger("worker");
 
@@ -47,6 +48,8 @@ export default {
 
     await stub.fetch("http://internal/internal/tick", { method: "POST" });
   },
+
+  queue: consumeImageBuildFinalizations,
 };
 
 /**
