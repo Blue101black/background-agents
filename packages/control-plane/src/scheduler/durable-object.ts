@@ -35,6 +35,7 @@ import {
   type AutomationEnvironmentRow,
 } from "../db/automation-store";
 import { SlackChannelStore } from "../db/slack-channel-store";
+import { IntegrationSettingsStore } from "../db/integration-settings";
 import {
   buildSlackCompletionNotification,
   buildSlackSkipNotification,
@@ -110,6 +111,20 @@ function formatRunRepositoryLabel(
   run: Pick<AutomationRunRow, "repo_owner" | "repo_name"> | null | undefined
 ): string {
   return run?.repo_owner && run?.repo_name ? `${run.repo_owner}/${run.repo_name}` : "No repository";
+}
+
+async function getSlackSessionInstructions(db: SqlDatabase): Promise<string | undefined> {
+  try {
+    const instructions = (await new IntegrationSettingsStore(db).getGlobal("slack"))?.defaults
+      ?.sessionInstructions;
+    return typeof instructions === "string" && instructions.trim() ? instructions : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function appendSlackSessionInstructions(prompt: string, instructions: string | undefined): string {
+  return instructions ? `${prompt}\n\n## Additional Instructions\n\n${instructions}` : prompt;
 }
 
 const manualTriggerBodySchema = z.object({
@@ -853,6 +868,8 @@ export class SchedulerDO extends DurableObject<Env> {
     // Surface at most one concurrency-skip ephemeral per event, even when
     // several automations watch the same thread and all skip.
     let concurrencySkipped = false;
+    let slackSessionInstructions: string | undefined;
+    let slackSettingsLoaded = false;
 
     for (const automation of candidates) {
       const now = Date.now();
@@ -888,6 +905,11 @@ export class SchedulerDO extends DurableObject<Env> {
         continue;
       }
 
+      if (event.source === "slack" && !slackSettingsLoaded) {
+        slackSessionInstructions = await getSlackSessionInstructions(this.db);
+        slackSettingsLoaded = true;
+      }
+
       // Event firings are invocations of 1 (or 0 children when skipped): same
       // per-key concurrency, same trigger_key dedup — both now enforced on the
       // invocation, atomically. The overlap skip also covers the brief slack
@@ -900,7 +922,10 @@ export class SchedulerDO extends DurableObject<Env> {
         triggerKey: event.triggerKey,
         concurrencyKey: event.concurrencyKey,
         triggerMetadata: event.source === "slack" ? serializeSlackTriggerMetadata(event) : null,
-        instructionsOverride: `${event.contextBlock}\n---\n\n${automation.instructions}`,
+        instructionsOverride: appendSlackSessionInstructions(
+          `${event.contextBlock}\n---\n\n${automation.instructions}`,
+          slackSessionInstructions
+        ),
       });
 
       switch (result.outcome) {
