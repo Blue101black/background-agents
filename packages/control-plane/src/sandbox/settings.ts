@@ -1,5 +1,6 @@
 import {
   findSandboxPortConflict,
+  MIN_SANDBOX_TIMEOUT_MS,
   MAX_TUNNEL_PORTS,
   type ConfiguredSandboxPort,
   type SandboxSettings,
@@ -119,6 +120,19 @@ export function normalizeSandboxSettings(
       reject("memoryMib must be a positive integer");
     } else {
       result.memoryMib = settings.memoryMib;
+    }
+  }
+
+  if (settings.sandboxTimeoutMs !== undefined) {
+    if (
+      typeof settings.sandboxTimeoutMs !== "number" ||
+      !Number.isSafeInteger(settings.sandboxTimeoutMs) ||
+      settings.sandboxTimeoutMs < MIN_SANDBOX_TIMEOUT_MS ||
+      settings.sandboxTimeoutMs % MIN_SANDBOX_TIMEOUT_MS !== 0
+    ) {
+      reject("sandboxTimeoutMs must be a positive whole number of seconds");
+    } else {
+      result.sandboxTimeoutMs = settings.sandboxTimeoutMs;
     }
   }
 
