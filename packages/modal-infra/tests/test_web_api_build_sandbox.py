@@ -6,6 +6,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import pytest
 
 from src import web_api
+from src.sandbox.manager import DEFAULT_BUILD_TIMEOUT_SECONDS
 
 
 def _patch_dependencies(monkeypatch: pytest.MonkeyPatch):
@@ -55,12 +56,52 @@ async def test_create_returns_provider_session_without_removing_legacy_endpoint(
             "scope_id": "acme/repo",
             "build_id": "imgb-1",
             "repositories": [{"repo_owner": "acme", "repo_name": "repo", "branch": "main"}],
+            "clone_token": "clone-token",
+            "clone_host": "gitlab.com",
+            "clone_username": "oauth2",
         },
     )
 
     assert result["data"]["provider_session_id"] == "modal-session-1"
-    service.create.assert_awaited_once()
+    service.create.assert_awaited_once_with(
+        build_id="imgb-1",
+        scope_kind="repo",
+        scope_id="acme/repo",
+        repositories=[{"repo_owner": "acme", "repo_name": "repo", "branch": "main"}],
+        clone_token="clone-token",
+        clone_host="gitlab.com",
+        clone_username="oauth2",
+        user_env_vars=None,
+        timeout_seconds=DEFAULT_BUILD_TIMEOUT_SECONDS,
+    )
     assert hasattr(web_api, "api_build_image")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("clone_host", ["gitlab.com"]),
+        ("clone_host", {"host": "gitlab.com"}),
+        ("clone_username", 123),
+    ],
+)
+async def test_create_rejects_non_string_clone_fields(monkeypatch, field, value):
+    service = _patch_dependencies(monkeypatch)
+    request = {
+        "scope_kind": "repo",
+        "scope_id": "acme/repo",
+        "build_id": "imgb-1",
+        "repositories": [{"repo_owner": "acme", "repo_name": "repo", "branch": "main"}],
+        field: value,
+    }
+
+    with pytest.raises(web_api.HTTPException) as exc:
+        await _call(web_api.api_create_build_sandbox, request)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == f"{field} must be a string"
+    service.create.assert_not_awaited()
 
 
 @pytest.mark.asyncio
