@@ -63,10 +63,6 @@ function createStore() {
     markStaleBuildsAsFailed: vi.fn().mockResolvedValue(0),
     getStatus: vi.fn().mockResolvedValue([]),
     getStatusForEnabledScopes: vi.fn().mockResolvedValue([]),
-    maintenance: {
-      getCursor: vi.fn().mockResolvedValue(null),
-      setCursor: vi.fn().mockResolvedValue(undefined),
-    },
   };
 }
 
@@ -200,6 +196,20 @@ describe("ImageBuildWorkflow", () => {
         callbackTokenExpiresAt: 9_999_999_999_999,
       });
       expect(adapter.startBuild).toHaveBeenCalledTimes(1);
+    });
+
+    it("reuses a caller-resolved target for one reconciliation snapshot", async () => {
+      const { workflow, resolveTarget, planBuild } = createWorkflow({});
+      const target = {
+        kind: "environment" as const,
+        repositories: [{ repoOwner: "acme", repoName: "web", baseBranch: "main" }],
+        repositoriesFingerprint: "fp-reconciled",
+      };
+
+      await workflow.triggerBuildWithTarget(ENV_SCOPE, target, ctx);
+
+      expect(resolveTarget).not.toHaveBeenCalled();
+      expect(planBuild).toHaveBeenCalledWith(expect.objectContaining({ target }));
     });
 
     it("reports the in-flight build instead of stacking another", async () => {
@@ -897,6 +907,32 @@ describe("ImageBuildWorkflow", () => {
       // Artifact not lost: the columns are left intact so the next tick retries.
       expect(result.reapedFailed).toBe(0);
       expect(store.clearFailedImageArtifact).not.toHaveBeenCalled();
+    });
+
+    it("attempts every failed artifact in one cleanup scan", async () => {
+      const store = createStore();
+      const rows = Array.from({ length: 26 }, (_, index) =>
+        reapableRow(`failed-${index + 1}`, `im-${index + 1}`)
+      );
+      store.getFailedImagesWithArtifacts.mockResolvedValue(rows);
+      const adapter = createAdapter();
+      let inFlight = 0;
+      let peakInFlight = 0;
+      adapter.deleteImage.mockImplementation(async ({ image }) => {
+        inFlight += 1;
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        if (image.providerImageId === "im-1") throw new Error("provider unavailable");
+      });
+      const { workflow } = createWorkflow({ store, adapter });
+
+      const result = await workflow.cleanupImages(86_400_000, ctx);
+
+      expect(result.reapedFailed).toBe(25);
+      expect(peakInFlight).toBeLessThanOrEqual(4);
+      expect(store.getFailedImagesWithArtifacts).toHaveBeenCalledWith();
+      expect(store.clearFailedImageArtifact).toHaveBeenCalledWith("failed-26", "im-26");
     });
 
     it("does not select already-reaped failed rows (idempotent across ticks)", async () => {
