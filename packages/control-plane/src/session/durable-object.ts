@@ -79,6 +79,8 @@ import {
 import { buildSessionTargetSecretSources } from "./session-target-secrets";
 import type { SessionRepositoryEntry } from "./repository-target";
 import { OpenAITokenRefreshService } from "./openai-token-refresh-service";
+import { XaiTokenRefreshService } from "./xai-token-refresh-service";
+import { prepareManagedProviderEnv } from "../sandbox/managed-provider-env";
 import { ScmCredentialsService } from "./scm-credentials-service";
 import { ParticipantService, getAvatarUrl } from "./participant-service";
 import { UserScmTokenStore } from "../db/user-scm-tokens";
@@ -236,6 +238,7 @@ export class SessionDO extends DurableObject<Env> {
     verifySandboxToken: (request, _url, log) =>
       this.sandboxHandler.verifySandboxToken(request, log),
     openaiTokenRefresh: (_request, _url, log) => this.sandboxHandler.openaiTokenRefresh(log),
+    xaiTokenRefresh: (_request, _url, log) => this.sandboxHandler.xaiTokenRefresh(log),
     scmCredentials: (_request, _url, log) => this.sandboxHandler.scmCredentials(log),
     tunnelUrls: (_request, _url, log) => this.sandboxHandler.tunnelUrls(log),
     spawnContext: () => this.childSessionsHandler.getSpawnContext(),
@@ -465,7 +468,16 @@ export class SessionDO extends DurableObject<Env> {
           );
           return service.refresh(session);
         },
-        isOpenAISecretsConfigured: () => Boolean(this.db && this.env.REPO_SECRETS_ENCRYPTION_KEY),
+        refreshXaiToken: async (session, log) => {
+          const service = new XaiTokenRefreshService(
+            this.db!,
+            this.env.REPO_SECRETS_ENCRYPTION_KEY!,
+            (sessionRow) => this.ensureRepoId(sessionRow),
+            log
+          );
+          return service.refresh(session);
+        },
+        isManagedSecretsConfigured: () => Boolean(this.db && this.env.REPO_SECRETS_ENCRYPTION_KEY),
         getScmCredentials: (log) =>
           new ScmCredentialsService(this.sourceControlProvider, log).getCredentials(),
         messenger: this.messenger,
@@ -1814,10 +1826,11 @@ export class SessionDO extends DurableObject<Env> {
 
     const repoStore = new RepoSecretsStore(this.db, encryptionKey);
     const environmentSecretsStore = new EnvironmentSecretsStore(this.db, encryptionKey);
+    const members = this.repository.getSessionRepositories();
     const sources = await buildSessionTargetSecretSources({
       environmentId: session.environment_id,
       globalSecrets,
-      members: this.repository.getSessionRepositories(),
+      members,
       loadMemberSecrets: (member) => this.loadMemberRepoSecrets(session, member, repoStore),
       loadEnvironmentSecrets: (environmentId) =>
         environmentSecretsStore.getDecryptedSecrets(environmentId),
@@ -1841,7 +1854,21 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
-    return mergedCount === 0 ? undefined : merge.merged;
+    if (mergedCount === 0) return undefined;
+    const primary = members.find((member) => member.isPrimary);
+    const managedSources = session.environment_id
+      ? sources
+      : sources.filter(
+          (source) =>
+            source.label === "global" ||
+            (primary && source.label === `${primary.repoOwner}/${primary.repoName}`)
+        );
+    const managedSecrets = mergeSecretSources(managedSources).merged;
+    const sandboxEnv = prepareManagedProviderEnv({
+      exposedSecrets: merge.merged,
+      brokerSecrets: managedSecrets,
+    });
+    return Object.keys(sandboxEnv).length === 0 ? undefined : sandboxEnv;
   }
 
   /**
