@@ -40,7 +40,7 @@ const OPENAI_MODELS = [
   "openai/gpt-5.3-codex-spark",
 ] as const;
 
-const XAI_MODELS = ["xai/grok-build-0.1"] as const;
+const XAI_MODELS = ["xai/grok-4.5", "xai/grok-build-0.1"] as const;
 
 const ZEN_MODELS = [
   "opencode/kimi-k2.5",
@@ -242,7 +242,7 @@ describe("model utilities", () => {
     expect(supportsReasoning("claude-opus-4-8")).toBe(true);
     expect(supportsReasoning("openai/gpt-5.4")).toBe(true);
     expect(supportsReasoning("openai/gpt-5.6-terra")).toBe(true);
-    expect(supportsReasoning("xai/grok-build-0.1")).toBe(true);
+    expect(supportsReasoning("xai/grok-build-0.1")).toBe(false);
     expect(supportsReasoning("deepseek/deepseek-v4-flash")).toBe(false);
     expect(supportsReasoning("invalid")).toBe(false);
 
@@ -254,7 +254,7 @@ describe("model utilities", () => {
     expect(getDefaultReasoningEffort("openai/gpt-5.3-codex")).toBe("high");
     expect(getDefaultReasoningEffort("openai/gpt-5.5")).toBeUndefined();
     expect(getDefaultReasoningEffort("openai/gpt-5.6-luna")).toBeUndefined();
-    expect(getDefaultReasoningEffort("xai/grok-build-0.1")).toBe("high");
+    expect(getDefaultReasoningEffort("xai/grok-build-0.1")).toBeUndefined();
     expect(getDefaultReasoningEffort("deepseek/deepseek-v4-pro")).toBeUndefined();
   });
 
@@ -287,10 +287,7 @@ describe("model utilities", () => {
       efforts: ["low", "medium", "high", "xhigh"],
       default: "high",
     });
-    expect(getReasoningConfig("xai/grok-build-0.1")).toEqual({
-      efforts: ["low", "medium", "high"],
-      default: "high",
-    });
+    expect(getReasoningConfig("xai/grok-build-0.1")).toBeUndefined();
     expect(getReasoningConfig("deepseek/deepseek-v4-flash")).toBeUndefined();
   });
 
@@ -306,7 +303,7 @@ describe("model utilities", () => {
     expect(isValidReasoningEffort("openai/gpt-5.6-sol", "xhigh")).toBe(true);
     expect(isValidReasoningEffort("openai/gpt-5.6-sol", "max")).toBe(false);
     expect(isValidReasoningEffort("openai/gpt-5.3-codex", "max")).toBe(false);
-    expect(isValidReasoningEffort("xai/grok-build-0.1", "high")).toBe(true);
+    expect(isValidReasoningEffort("xai/grok-build-0.1", "high")).toBe(false);
     expect(isValidReasoningEffort("xai/grok-build-0.1", "xhigh")).toBe(false);
     expect(isValidReasoningEffort("deepseek/deepseek-v4-pro", "high")).toBe(false);
     expect(isValidReasoningEffort("invalid", "high")).toBe(false);
