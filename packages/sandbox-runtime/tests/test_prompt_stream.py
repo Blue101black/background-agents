@@ -367,6 +367,18 @@ class TestApplySseEventDispositions:
             }
         ]
 
+    def test_child_session_error_after_completion_keeps_completed_task_ownership(self):
+        state = make_state()
+        state.child_activity.associate(CHILD_SESSION_ID, "task-call-1")
+        state.child_activity.close("task-call-1")
+
+        step = make_stream()._apply_sse_event(
+            state,
+            sse("session.error", {"sessionID": CHILD_SESSION_ID, "error": {}}),
+        )
+
+        assert step.events[0]["taskCallId"] == "task-call-1"
+
     def test_uncorrelated_child_error_is_flushed_at_parent_idle(self):
         state = make_state()
         state.child_activity.track(CHILD_SESSION_ID)
@@ -447,15 +459,29 @@ class TestApplySseEventDispositions:
 
         assert late_part.events[0]["taskCallId"] == "task-call"
 
-    def test_late_child_message_is_not_reassigned_to_resumed_task(self):
+    def test_child_message_after_completion_keeps_completed_task_ownership(self):
         state = make_state()
         state.allowed_assistant_msg_ids.add("parent-msg")
-        state.child_activity.track(CHILD_SESSION_ID)
-        state.child_activity.associate(CHILD_SESSION_ID, "closed-task")
-        state.child_activity.close("closed-task")
         stream = make_stream()
 
-        stream._apply_sse_event(
+        completed_task = stream._apply_sse_event(
+            state,
+            sse(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "tool",
+                        "sessionID": PARENT_SESSION_ID,
+                        "messageID": "parent-msg",
+                        "tool": "task",
+                        "callID": "closed-task",
+                        "metadata": {"sessionId": CHILD_SESSION_ID},
+                        "state": {"status": "completed", "input": {"prompt": "review"}},
+                    }
+                },
+            ),
+        )
+        late_message = stream._apply_sse_event(
             state,
             sse(
                 "message.updated",
@@ -468,7 +494,7 @@ class TestApplySseEventDispositions:
                 },
             ),
         )
-        stream._apply_sse_event(
+        late_part = stream._apply_sse_event(
             state,
             sse(
                 "message.part.updated",
@@ -501,8 +527,53 @@ class TestApplySseEventDispositions:
                 },
             ),
         )
+        repeated_message = stream._apply_sse_event(
+            state,
+            sse(
+                "message.updated",
+                {
+                    "info": {
+                        "id": "late-child-msg",
+                        "role": "assistant",
+                        "sessionID": CHILD_SESSION_ID,
+                    }
+                },
+            ),
+        )
+        final_part = stream._apply_sse_event(
+            state,
+            sse(
+                "message.part.updated",
+                {
+                    "part": {
+                        "type": "tool",
+                        "sessionID": CHILD_SESSION_ID,
+                        "messageID": "late-child-msg",
+                        "tool": "Bash",
+                        "callID": "final-call",
+                        "state": {"status": "completed", "input": {"command": "git status"}},
+                    }
+                },
+            ),
+        )
         orphaned = stream._flush_unassociated_child_activity(state)
 
+        assert completed_task.events[0]["childSessionId"] == CHILD_SESSION_ID
+        assert late_message.events == []
+        assert late_part.events == [
+            {
+                "type": "tool_call",
+                "tool": "Read",
+                "args": {"filePath": "README.md"},
+                "callId": "late-call",
+                "status": "completed",
+                "output": "",
+                "messageId": "cp-msg-1",
+                "isSubtask": True,
+                "childSessionId": CHILD_SESSION_ID,
+                "taskCallId": "closed-task",
+            }
+        ]
         assert resumed_task.events == [
             {
                 "type": "tool_call",
@@ -515,8 +586,9 @@ class TestApplySseEventDispositions:
                 "childSessionId": CHILD_SESSION_ID,
             }
         ]
-        assert orphaned[0]["childSessionId"] == CHILD_SESSION_ID
-        assert "taskCallId" not in orphaned[0]
+        assert repeated_message.events == []
+        assert final_part.events[0]["taskCallId"] == "closed-task"
+        assert orphaned == []
 
     def test_other_session_events_are_filtered_out(self):
         step = make_stream()._apply_sse_event(
