@@ -38,6 +38,7 @@ import {
 import { McpServerStore } from "../db/mcp-servers";
 import { IntegrationSettingsStore, resolveSlackSettings } from "../db/integration-settings";
 import { SessionIndexStore } from "../db/session-index";
+import { isSandboxReconnectBlockedStatus } from "../sandbox/lifecycle/decisions";
 import { DEFAULT_SANDBOX_TIMEOUT_SECONDS } from "../sandbox/provider";
 import { parsePersistedSandboxSettings } from "../sandbox/settings";
 import {
@@ -119,6 +120,7 @@ import {
 } from "./http/handlers/participants.handler";
 import { MessageService } from "./services/message.service";
 import { createAlarmHandler, type AlarmHandler } from "./alarm/handler";
+import { createEarliestAlarmScheduler } from "./alarm/scheduler";
 import { SessionDiffStore } from "./diffs/store";
 import { SessionDiffService } from "./diffs/service";
 import { SessionDiffsHandler } from "./http/handlers/session-diffs.handler";
@@ -203,6 +205,7 @@ export class SessionDO extends DurableObject<Env> {
   private _participantsHandler: ParticipantsHandler | null = null;
   // Alarm handler (lazily initialized)
   private _alarmHandler: AlarmHandler | null = null;
+  private _alarmScheduler: AlarmScheduler | null = null;
   // Sandbox event processor (lazily initialized)
   private _sandboxEventProcessor: SessionSandboxEventProcessor | null = null;
   // Session status service (lazily initialized)
@@ -385,6 +388,13 @@ export class SessionDO extends DurableObject<Env> {
     );
   }
 
+  private get alarmScheduler(): AlarmScheduler {
+    if (!this._alarmScheduler) {
+      this._alarmScheduler = createEarliestAlarmScheduler(this.ctx.storage);
+    }
+    return this._alarmScheduler;
+  }
+
   private get messageQueue(): SessionMessageQueue {
     if (!this._messageQueue) {
       this._messageQueue = new SessionMessageQueue(
@@ -400,6 +410,7 @@ export class SessionDO extends DurableObject<Env> {
         this.lifecycleManager,
         this.db ? new SessionIndexStore(this.db) : null,
         resolveScmProviderFromEnv(this.env.SCM_PROVIDER),
+        this.alarmScheduler,
         this.executionTimeoutMs,
         (input) => this.terminalMessageProjection.recordTerminalMessage(input)
       );
@@ -643,6 +654,7 @@ export class SessionDO extends DurableObject<Env> {
         repository: this.repository,
         messageQueue: this.messageQueue,
         lifecycleManager: this.lifecycleManager,
+        alarmScheduler: this.alarmScheduler,
         executionTimeoutMs: this.executionTimeoutMs,
         now: () => Date.now(),
         log: this.log,
@@ -777,13 +789,6 @@ export class SessionDO extends DurableObject<Env> {
       getConnectedClientCount: () => this.wsManager.getConnectedClientCount(),
     };
 
-    // Alarm scheduler adapter
-    const alarmScheduler: AlarmScheduler = {
-      scheduleAlarm: async (timestamp) => {
-        await this.ctx.storage.setAlarm(timestamp);
-      },
-    };
-
     // ID generator adapter
     const idGenerator: IdGenerator = {
       generateId: () => generateId(),
@@ -860,7 +865,7 @@ export class SessionDO extends DurableObject<Env> {
       storage,
       broadcaster,
       wsManager,
-      alarmScheduler,
+      this.alarmScheduler,
       idGenerator,
       config,
       {
@@ -995,7 +1000,7 @@ export class SessionDO extends DurableObject<Env> {
       // Deliberately narrower than isDeadSandboxStatus: a "failed" sandbox may
       // still connect — a slow boot that outlived the connecting watchdog
       // self-heals here by flipping the status back to ready.
-      if (sandbox?.status === "stopped" || sandbox?.status === "stale") {
+      if (sandbox && isSandboxReconnectBlockedStatus(sandbox.status)) {
         log.warn("ws.connect", {
           event: "ws.connect",
           ws_type: "sandbox",
@@ -1105,12 +1110,17 @@ export class SessionDO extends DurableObject<Env> {
   /**
    * Handle WebSocket close.
    */
-  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+  async webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
     this.ensureInitialized();
-    const { kind } = this.wsManager.classify(ws);
+    const connection = this.wsManager.classify(ws);
 
     try {
-      if (kind === "sandbox") {
+      if (connection.kind === "sandbox") {
         const wasActive = this.wsManager.clearSandboxSocketIfMatch(ws);
         if (!wasActive) {
           // sandboxWs points to a different socket — this close is for a replaced connection.
@@ -1118,16 +1128,20 @@ export class SessionDO extends DurableObject<Env> {
           return;
         }
 
-        const isNormalClose = code === 1000 || code === 1001;
-        if (isNormalClose) {
-          this.updateSandboxStatus("stopped");
-        } else {
-          // Abnormal close (e.g., 1006): leave status unchanged so the bridge can reconnect.
-          // Schedule a heartbeat check to detect truly dead sandboxes.
-          this.log.warn("Sandbox WebSocket abnormal close", {
-            event: "sandbox.abnormal_close",
+        const sandboxStatus = this.getSandbox()?.status;
+        const reconnectBlocked =
+          sandboxStatus !== undefined && isSandboxReconnectBlockedStatus(sandboxStatus);
+        if (!reconnectBlocked) {
+          // A close frame only ends this transport connection. Explicit lifecycle
+          // paths persist stopped/stale before closing the socket; otherwise the
+          // bridge must be allowed to reconnect regardless of the peer close code.
+          this.log.warn("Sandbox WebSocket disconnected; awaiting reconnect", {
+            event: "sandbox.disconnected",
             code,
             reason,
+            was_clean: wasClean,
+            sandbox_status: sandboxStatus,
+            sandbox_id: connection.sandboxId,
           });
           await this.lifecycleManager.scheduleDisconnectCheck();
         }
