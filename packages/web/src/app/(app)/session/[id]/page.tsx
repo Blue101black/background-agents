@@ -60,6 +60,8 @@ import {
 
 type SessionState = ReturnType<typeof useSessionSocket>["sessionState"];
 
+const TERMINAL_VISIBLE_STORAGE_KEY = "terminal-visible";
+
 export default function SessionPage() {
   return (
     <Suspense>
@@ -146,20 +148,30 @@ function SessionPageContent() {
   const detailsButtonRef = useRef<HTMLButtonElement>(null);
   const actionsButtonRef = useRef<HTMLButtonElement>(null);
 
-  // Terminal panel state
-  const [terminalOpen, setTerminalOpen] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("terminal-visible") === "true";
-  });
-  const toggleTerminal = useCallback(() => {
-    const next = !terminalOpen;
-    localStorage.setItem("terminal-visible", String(next));
-    setTerminalOpen(next);
-  }, [terminalOpen]);
-  const closeTerminal = useCallback(() => {
-    setTerminalOpen(false);
-    localStorage.setItem("terminal-visible", "false");
+  // Terminal panel state. Starts closed so the server and the client render the
+  // same markup, then adopts the stored preference after hydration.
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  useEffect(() => {
+    try {
+      setTerminalOpen(localStorage.getItem(TERMINAL_VISIBLE_STORAGE_KEY) === "true");
+    } catch {
+      // Storage is optional; the terminal stays closed when it is unavailable.
+    }
   }, []);
+  const applyTerminalOpen = useCallback((next: boolean) => {
+    setTerminalOpen(next);
+    try {
+      localStorage.setItem(TERMINAL_VISIBLE_STORAGE_KEY, String(next));
+    } catch {
+      // Continue with the in-memory preference when storage is unavailable.
+    }
+  }, []);
+  const toggleTerminal = useCallback(() => {
+    applyTerminalOpen(!terminalOpen);
+  }, [applyTerminalOpen, terminalOpen]);
+  const closeTerminal = useCallback(() => {
+    applyTerminalOpen(false);
+  }, [applyTerminalOpen]);
   const ttydUrl = sessionState?.ttydUrl;
   const ttydToken = sessionState?.ttydToken;
   const showTerminal = !!(ttydUrl && ttydToken && terminalOpen && !isBelowLg);
