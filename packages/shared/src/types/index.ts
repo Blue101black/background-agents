@@ -85,6 +85,7 @@ export type {
   AgentResponse,
   ArtifactType,
 } from "./artifacts";
+export { sessionArtifactSchema } from "./artifacts";
 
 export {
   eventResponseSchema,
