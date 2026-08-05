@@ -208,16 +208,39 @@ export function toolCallIdentityKey(event: ToolCallIdentityEvent): string {
   return JSON.stringify(toolCallIdentityTuple(event));
 }
 
-export interface EventResponse {
-  id: string;
-  type: EventType;
-  data: Record<string, unknown>;
-  messageId: string | null;
-  createdAt: number;
-}
+/**
+ * Runtime companion to `EventType`: the enum is derived from the canonical
+ * `sandboxEventSchema` discriminator values, so it can never drift from the
+ * event union that owns the contract.
+ */
+export const eventTypeSchema = z.enum(
+  sandboxEventSchema.options.map((option) => option.shape.type.value) as [EventType, ...EventType[]]
+);
 
-export interface ListEventsResponse {
-  events: EventResponse[];
-  cursor?: string;
-  hasMore: boolean;
-}
+export const eventResponseSchema = z.object({
+  id: z.string(),
+  type: eventTypeSchema,
+  data: recordSchema,
+  messageId: z.string().nullable(),
+  createdAt: z.number(),
+});
+
+/**
+ * Pagination invariant: a page that reports more results must carry the cursor
+ * needed to fetch them. Consumers stop paginating when `cursor` is absent, so a
+ * `hasMore: true` page without a cursor would silently truncate the history and
+ * can produce a false completion from partial events.
+ */
+export const listEventsResponseSchema = z
+  .object({
+    events: z.array(eventResponseSchema),
+    cursor: z.string().min(1).optional(),
+    hasMore: z.boolean(),
+  })
+  .refine((page) => !page.hasMore || page.cursor !== undefined, {
+    message: "cursor is required when hasMore is true",
+    path: ["cursor"],
+  });
+
+export type EventResponse = z.infer<typeof eventResponseSchema>;
+export type ListEventsResponse = z.infer<typeof listEventsResponseSchema>;
