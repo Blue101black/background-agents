@@ -81,6 +81,102 @@ describe("GitHubSourceControlProvider", () => {
         provider.getBranchHead({ owner: "acme", name: "web", branch: "missing" })
       ).resolves.toBeNull();
     });
+
+    it("rejects malformed branch ref responses", async () => {
+      mockGetCachedInstallationToken.mockResolvedValue("installation-token");
+      mockFetchWithTimeout.mockResolvedValue(makeJsonResponse({ object: {} }));
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const err = await provider
+        .getBranchHead({ owner: "acme", name: "web", branch: "main" })
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(SourceControlProviderError);
+      expect((err as SourceControlProviderError).message).toBe(
+        "Failed to resolve branch head: unexpected response shape (object.sha)"
+      );
+      expect((err as SourceControlProviderError).errorType).toBe("permanent");
+    });
+  });
+
+  describe("getRepository", () => {
+    it("maps GitHub repository metadata from a valid API response", async () => {
+      mockFetchWithTimeout.mockResolvedValue(
+        makeJsonResponse({
+          id: 42,
+          name: "web",
+          full_name: "acme/web",
+          default_branch: "main",
+          private: true,
+          owner: { login: "acme" },
+        })
+      );
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      await expect(
+        provider.getRepository(
+          { authType: "app", token: "installation-token" },
+          { owner: "acme", name: "web" }
+        )
+      ).resolves.toEqual({
+        owner: "acme",
+        name: "web",
+        fullName: "acme/web",
+        defaultBranch: "main",
+        isPrivate: true,
+        providerRepoId: 42,
+      });
+    });
+
+    it("rejects malformed repository metadata responses", async () => {
+      mockFetchWithTimeout.mockResolvedValue(
+        makeJsonResponse({
+          id: 42,
+          name: "web",
+          full_name: "acme/web",
+          default_branch: null,
+          private: true,
+          owner: { login: "acme" },
+        })
+      );
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const err = await provider
+        .getRepository(
+          { authType: "app", token: "installation-token" },
+          { owner: "acme", name: "web" }
+        )
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(SourceControlProviderError);
+      expect((err as SourceControlProviderError).message).toBe(
+        "Failed to get repository: unexpected response shape (default_branch)"
+      );
+      expect((err as SourceControlProviderError).errorType).toBe("permanent");
+    });
+
+    it("rejects non-JSON repository responses", async () => {
+      mockFetchWithTimeout.mockResolvedValue(
+        new Response("<html>gateway</html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        })
+      );
+      const provider = new GitHubSourceControlProvider({ appConfig: fakeAppConfig });
+
+      const err = await provider
+        .getRepository(
+          { authType: "app", token: "installation-token" },
+          { owner: "acme", name: "web" }
+        )
+        .catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(SourceControlProviderError);
+      expect((err as SourceControlProviderError).message).toBe(
+        "Failed to get repository: response body is not JSON"
+      );
+      expect((err as SourceControlProviderError).errorType).toBe("permanent");
+    });
   });
 
   describe("checkRepositoryAccess", () => {
