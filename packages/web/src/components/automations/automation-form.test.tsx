@@ -109,6 +109,25 @@ const openRepositoryPicker = () =>
   fireEvent.click(screen.getByRole("button", { name: "Repository Configuration" }));
 
 describe("automation cron submission", () => {
+  it("groups conditions under an accessible name", () => {
+    render(
+      <AutomationForm
+        mode="create"
+        submitting={false}
+        onSubmit={vi.fn()}
+        initialValues={{
+          name: "Watch Sentry",
+          triggerType: "sentry",
+          repositories: singleRepository,
+          model: "openai/gpt-5.4",
+          instructions: "Triage the alert.",
+        }}
+      />
+    );
+
+    expect(screen.getByRole("group", { name: /Conditions/ })).toBeInTheDocument();
+  });
+
   it("clears the propagated cron when custom input becomes invalid", () => {
     const onChange = vi.fn();
 

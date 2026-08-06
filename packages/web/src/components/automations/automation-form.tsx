@@ -389,7 +389,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
         </div>
       ) : (
         <div>
-          <label className="block text-sm font-medium text-foreground mb-1.5">Trigger Type</label>
+          <div className="block text-sm font-medium text-foreground mb-1.5">Trigger Type</div>
           <div className="text-sm text-muted-foreground px-3 py-2 border border-border-muted rounded-md bg-muted/30">
             {{
               schedule: "Schedule",
@@ -838,11 +838,11 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
 
       {/* Conditions (for non-schedule types) */}
       {!isSchedule && TRIGGER_TYPE_TO_SOURCE[triggerType] && (
-        <div>
-          <label className="block text-sm font-medium text-foreground mb-1.5">
+        <fieldset className="m-0 min-w-0 border-0 p-0">
+          <legend className="block text-sm font-medium text-foreground mb-1.5">
             Conditions
             <span className="text-xs text-muted-foreground ml-1 font-normal">(optional)</span>
-          </label>
+          </legend>
           <ConditionBuilder
             conditions={conditions}
             onChange={setConditions}
@@ -857,7 +857,7 @@ export function AutomationForm({ mode, initialValues, onSubmit, submitting }: Au
               Slack triggers require at least one Slack Channel condition.
             </p>
           )}
-        </div>
+        </fieldset>
       )}
 
       {/* Instructions */}
