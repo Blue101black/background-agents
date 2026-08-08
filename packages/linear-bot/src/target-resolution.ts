@@ -1,7 +1,8 @@
 /**
  * Session target resolution for Linear issues.
  *
- * Owns the four-stage ladder — project mapping → team mapping → Linear's
+ * Owns the five-stage ladder — project mapping → team mapping → explicit
+ * `owner/repo` in the trigger or clarification-reply comment → Linear's
  * repo-suggestions API → LLM classification — and the target-kind policy.
  * Team and project mappings may name a repository or a saved environment
  * (design §7.5); the suggestion and classification stages remain
@@ -14,6 +15,7 @@ import type {
   Environment,
   AgentSessionWebhookIssue,
   IssueSession,
+  RepoConfig,
   StaticTargetConfig,
 } from "./types";
 import type { LinearApiClient } from "./utils/linear-client";
@@ -28,6 +30,38 @@ import { getProjectRepoMapping, getTeamRepoMapping } from "./kv-store";
 import { createLogger } from "./logger";
 
 const log = createLogger("target-resolution");
+
+/**
+ * Find the single available repository a comment names explicitly.
+ *
+ * Case-insensitive, boundary-guarded so `acme/api` does not match inside
+ * `acme/api-legacy`, `notacme/api`, `not.acme/api`, or `acme/api.docs`, and
+ * null when the comment names zero or several repositories — several is
+ * still an ambiguity the classifier should see.
+ */
+export function matchExplicitRepo(text: string, repos: RepoConfig[]): RepoConfig | null {
+  const haystack = text.toLowerCase();
+  const pathChar = /[\w/-]/;
+  const named = repos.filter((repo) => {
+    const needle = repo.fullName.toLowerCase();
+    for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+      const end = at + needle.length;
+      const before = haystack[at - 1] ?? "";
+      const after = haystack[end] ?? "";
+      // A neighbor extends the repository path when it is a path character,
+      // or a period connecting to one (`not.acme/api`, `acme/api.docs`). A
+      // period followed by nothing path-like is ordinary terminal
+      // punctuation (`use acme/api.`).
+      const beforeExtends =
+        pathChar.test(before) || (before === "." && pathChar.test(haystack[at - 2] ?? ""));
+      const afterExtends =
+        pathChar.test(after) || (after === "." && pathChar.test(haystack[end + 1] ?? ""));
+      if (!beforeExtends && !afterExtends) return true;
+    }
+    return false;
+  });
+  return named.length === 1 ? named[0] : null;
+}
 
 /** A resolved session target: a repository or a saved environment. */
 export type SessionTarget =
@@ -208,8 +242,21 @@ export async function resolveSessionTarget(
     }
   }
 
-  // 3. Try Linear's built-in issueRepositorySuggestions API
+  // 3. An explicit `owner/repo` in the trigger comment — or in the reply to a
+  //    clarification this resolver previously elicited — beats every heuristic
+  //    below: it is the answer the elicitation asked for.
   const repos = await getAvailableRepos(env, traceId);
+  if (comment?.body) {
+    const named = matchExplicitRepo(comment.body, repos);
+    if (named) {
+      return {
+        target: repositoryTarget(named.owner, named.name, named.fullName),
+        reasoning: `Repository named explicitly in the comment: ${named.fullName}`,
+      };
+    }
+  }
+
+  // 4. Try Linear's built-in issueRepositorySuggestions API
   if (repos.length > 0) {
     const candidates = repos.map((r) => ({
       hostname: "github.com",
@@ -229,7 +276,7 @@ export async function resolveSessionTarget(
     }
   }
 
-  // 4. Fall back to our LLM classification
+  // 5. Fall back to our LLM classification
   await emitAgentActivity(
     client,
     agentSessionId,
