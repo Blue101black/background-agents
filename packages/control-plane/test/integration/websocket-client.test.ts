@@ -309,6 +309,18 @@ describe("Client WebSocket (via SELF.fetch)", () => {
         }),
         createdAt: now - 1000,
       },
+      {
+        id: "ev-3",
+        type: "context_compacted",
+        data: JSON.stringify({
+          type: "context_compacted",
+          messageId: "message-1",
+          sandboxId: "sandbox-1",
+          timestamp: now / 1000,
+        }),
+        messageId: "message-1",
+        createdAt: now,
+      },
     ]);
 
     const { ws, messages } = await openClientWs(name, { subscribe: true });
@@ -320,9 +332,13 @@ describe("Client WebSocket (via SELF.fetch)", () => {
       hasMore: boolean;
     };
     expect(timeline).toBeDefined();
-    expect(timeline.events).toHaveLength(2);
+    expect(timeline.events).toHaveLength(3);
     expect(timeline.events[0]).toMatchObject({ eventId: "ev-1", event: { type: "git_sync" } });
     expect(timeline.events[1]).toMatchObject({ eventId: "ev-2", event: { type: "git_sync" } });
+    expect(timeline.events[2]).toMatchObject({
+      eventId: "ev-3",
+      event: { type: "context_compacted", messageId: "message-1" },
+    });
 
     ws.close();
   });
