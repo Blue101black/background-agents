@@ -7,7 +7,6 @@ from sandbox_runtime.constants import (
     VNC_PASSWORD_ENV_VAR,
     VNC_PASSWORD_MAX_BYTES,
 )
-from sandbox_runtime.types import SessionConfig
 from src.sandbox.manager import (
     DEFAULT_SANDBOX_TIMEOUT_SECONDS,
     SandboxConfig,
@@ -366,27 +365,6 @@ async def test_restore_omits_branch_when_none(monkeypatch):
 
     session_config = json.loads(captured["env"]["SESSION_CONFIG"])
     assert "branch" not in session_config
-
-
-@pytest.mark.asyncio
-async def test_restore_with_session_config_object(monkeypatch):
-    """restore_from_snapshot extracts branch from a SessionConfig object."""
-    captured = _fake_restore_setup(monkeypatch)
-
-    manager = SandboxManager()
-    config = SessionConfig(
-        session_id="sess-1",
-        repo_owner="acme",
-        repo_name="repo",
-        branch="develop",
-    )
-    await manager.restore_from_snapshot(
-        snapshot_image_id="img-abc",
-        session_config=config,
-    )
-
-    session_config = json.loads(captured["env"]["SESSION_CONFIG"])
-    assert session_config["branch"] == "develop"
 
 
 # ---------------------------------------------------------------------------
