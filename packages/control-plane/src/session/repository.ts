@@ -933,6 +933,17 @@ export class SessionRepository {
     );
   }
 
+  createContextCompactionEvent(data: CreateEventData & { messageId: string }): void {
+    this.transactionSync(() => {
+      this.sql.exec(
+        `UPDATE events SET id = ? WHERE id = ?`,
+        `token:${data.messageId}:${data.id}`,
+        `token:${data.messageId}`
+      );
+      this.createEvent(data);
+    });
+  }
+
   private upsertEventByMessageId<TType extends UpsertableEventType>(
     type: TType,
     messageId: string,
