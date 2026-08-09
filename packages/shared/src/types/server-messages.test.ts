@@ -31,6 +31,44 @@ describe("artifact_updated server message", () => {
   });
 });
 
+describe("VNC session protocol", () => {
+  it("preserves the VNC URL but strips its credential from subscribed state", () => {
+    const parsed = serverMessageSchema.parse({
+      type: "subscribed",
+      session: {
+        id: "session-1",
+        title: null,
+        repoOwner: "acme",
+        repoName: "web",
+        baseBranch: "main",
+        branchName: null,
+        status: "active",
+        sandboxStatus: "ready",
+        messageCount: 0,
+        createdAt: 1,
+        vncUrl: "https://desktop.example",
+        vncPassword: "secret",
+      },
+      artifacts: [],
+      participantId: "participant-1",
+      timeline: { events: [], hasMore: false, cursor: null },
+    });
+
+    expect(parsed).toMatchObject({ session: { vncUrl: "https://desktop.example" } });
+    expect(parsed.session).not.toHaveProperty("vncPassword");
+  });
+
+  it("rejects VNC credentials on the WebSocket protocol", () => {
+    expect(
+      serverMessageSchema.safeParse({
+        type: "vnc_info",
+        url: "https://desktop.example",
+        password: "secret",
+      }).success
+    ).toBe(false);
+  });
+});
+
 describe("Session.pullRequestSummary contract", () => {
   it("is optional on the session list contract and counts by display status", () => {
     expectTypeOf<Session["pullRequestSummary"]>().toEqualTypeOf<PullRequestSummary | undefined>();
@@ -58,6 +96,7 @@ describe("session view contracts", () => {
       session: {
         ...snapshotState,
         codeServerPassword: "secret",
+        vncPassword: "secret",
         ttydToken: "secret",
       },
       artifacts: [],
@@ -76,6 +115,7 @@ describe("session view contracts", () => {
     });
 
     expect(parsed.session).not.toHaveProperty("codeServerPassword");
+    expect(parsed.session).not.toHaveProperty("vncPassword");
     expect(parsed.session).not.toHaveProperty("ttydToken");
     expect(parsed.timeline.events.map((item) => item.eventId)).toEqual(["event-1"]);
   });
