@@ -4,6 +4,7 @@ import {
   getChannelInfo,
   getMessageDetails,
   getThreadMessages,
+  getUserInfo,
   postMessage,
   resolveUserNames,
   selectThreadWindow,
@@ -159,6 +160,13 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     );
     return;
   }
+  const userInfo = await getUserInfo(env.SLACK_BOT_TOKEN, user);
+  const senderName = (userInfo.ok ? userInfo.user?.profile?.display_name || user : user)
+    .replace(/[[\]\r\n]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  const senderLabel = senderName && senderName !== user ? `${senderName} (${user})` : user;
   // A message with no text of its own still needs prompt content for the agent
   // to act on; what it carried instead decides which stand-in to use.
   const imageOnly = !messageText && !forwarded.hasBody;
@@ -167,7 +175,9 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     (forwarded.entries.length > 0 ? FORWARD_ONLY_PROMPT_TEXT : IMAGE_ONLY_PROMPT_TEXT);
   // Forwarded bodies lead: the user's own text ("deal with this") is the
   // instruction and reads as one when it comes last.
-  const promptText = formatForwardedContext(forwarded.entries) + requestText;
+  const forwardedContext = formatForwardedContext(forwarded.entries);
+  const promptText = forwardedContext + requestText;
+  const deliveredPromptText = forwardedContext + `[${senderLabel}]: ${requestText}`;
 
   if (threadTs) {
     const existingSession = await lookupThreadSession(env, channel, threadTs);
@@ -196,7 +206,7 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
       const interimContext = interimMessages ? formatInterimThreadContext(interimMessages) : "";
       const promptResult = await deliverPrompt(env, {
         sessionId: existingSession.sessionId,
-        content: channelContext + interimContext + promptText,
+        content: channelContext + interimContext + deliveredPromptText,
         authorId: `slack:${user}`,
         attachments: await prepareImageAttachments(env, images, traceId),
         imageOnly,
@@ -269,7 +279,7 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
       return;
     }
     await storePendingRequest(env, channel, threadTs || ts, {
-      message: promptText,
+      message: deliveredPromptText,
       userId: user,
       previousMessages,
       channelName,
@@ -303,7 +313,7 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     target: result.target,
     channel,
     threadTs: threadKey,
-    messageText: promptText,
+    messageText: deliveredPromptText,
     userId: user,
     messageTs: ts,
     previousMessages,
