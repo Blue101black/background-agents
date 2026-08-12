@@ -24,7 +24,7 @@ export type {
   SessionAttachmentUploadResponse,
 } from "./session-attachments";
 
-export { clientMessageSchema } from "./websocket";
+export { clientMessageSchema, clientRequestIdSchema } from "./websocket";
 export type { ClientMessage } from "./websocket";
 
 export {
@@ -76,6 +76,7 @@ export {
 } from "./server-messages";
 export type {
   ParticipantPresence,
+  PromptQueueItem,
   ServerMessage,
   SessionSnapshot,
   SessionSnapshotState,

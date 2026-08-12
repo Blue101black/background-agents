@@ -58,6 +58,31 @@ function toolEvent(
 }
 
 describe("timeline auto-scrolling", () => {
+  it("does not scroll the timeline when the pending prompt stack changes", () => {
+    const events: SandboxEvent[] = [];
+    const { container, rerender } = render(
+      <SessionTimeline {...baseTimelineProps} events={events} promptQueue={[]} />
+    );
+    const timeline = container.firstElementChild as HTMLDivElement;
+    Object.defineProperties(timeline, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 600 },
+      scrollTop: { configurable: true, value: 200, writable: true },
+    });
+    fireEvent.scroll(timeline);
+    timeline.scrollTop = 0;
+
+    rerender(
+      <SessionTimeline
+        {...baseTimelineProps}
+        events={events}
+        promptQueue={[{ messageId: "queued", content: "Next prompt", status: "pending" }]}
+      />
+    );
+
+    expect(timeline.scrollTop).toBe(0);
+  });
+
   it("confines sub-task auto-scrolling to the timeline", () => {
     const task = toolEvent("task", "task-call", 1, {
       childSessionId: "child-1",

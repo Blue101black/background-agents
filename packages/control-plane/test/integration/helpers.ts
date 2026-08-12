@@ -370,7 +370,11 @@ export function collectMessages(
  */
 export async function openClientWs(
   sessionName: string,
-  opts?: { subscribe?: boolean; userId?: string; canonicalUserId?: string }
+  opts?: {
+    subscribe?: boolean;
+    userId?: string;
+    canonicalUserId?: string;
+  }
 ) {
   const response = await SELF.fetch(`https://test.local/sessions/${sessionName}/ws`, {
     headers: { Upgrade: "websocket" },

@@ -27,6 +27,7 @@ import { CheckIcon, CopyIcon, ErrorIcon } from "@/components/ui/icons";
 import { resolveParticipantDisplay } from "@/lib/participant-display";
 import { TerminalMessageReadObserver } from "./terminal-message-read-observer";
 import type { SessionReadAttemptDisposition } from "@/lib/session-read-state";
+import type { PromptQueueItem } from "@open-inspect/shared/types/server-messages";
 
 export function SessionTimeline({
   events,
@@ -34,6 +35,7 @@ export function SessionTimeline({
   currentParticipantId,
   participantProfiles,
   isProcessing,
+  promptQueue = [],
   loadingHistory,
   showSkeleton,
   onLoadOlder,
@@ -46,6 +48,7 @@ export function SessionTimeline({
   currentParticipantId: string | null;
   participantProfiles: Record<string, SessionParticipantProfile>;
   isProcessing: boolean;
+  promptQueue?: PromptQueueItem[];
   loadingHistory: boolean;
   showSkeleton: boolean;
   onLoadOlder: () => void;
@@ -54,6 +57,13 @@ export function SessionTimeline({
   onMarkMessageRead?: (messageId: string) => Promise<SessionReadAttemptDisposition>;
 }) {
   const timelineItems = useMemo(() => buildTimelineItems(events), [events]);
+  const pendingMessageIds = useMemo(
+    () =>
+      new Set(
+        promptQueue.filter((item) => item.status === "pending").map((item) => item.messageId)
+      ),
+    [promptQueue]
+  );
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(new Set());
   const latestTerminalMessageId = useMemo(() => {
@@ -179,6 +189,13 @@ export function SessionTimeline({
         />
       );
     }
+    if (
+      item.event.type === "user_message" &&
+      item.event.messageId &&
+      pendingMessageIds.has(item.event.messageId)
+    ) {
+      return null;
+    }
     return (
       <EventItem
         key={item.id}
@@ -247,7 +264,6 @@ export function SessionTimeline({
           })
         )}
         {isProcessing && <ThinkingIndicator />}
-
         <div />
       </div>
     </div>
@@ -448,7 +464,7 @@ function UserMessageEvent({
   return (
     <MessageFrame
       label={
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           {!isCurrentUser && avatar && (
             <img src={avatar} alt={authorName} className="w-5 h-5 rounded-full" />
           )}

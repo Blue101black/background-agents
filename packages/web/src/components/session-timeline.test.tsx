@@ -39,7 +39,7 @@ beforeEach(() => {
   });
 });
 
-function event(userId?: string): SandboxEvent {
+function event(userId?: string): Extract<SandboxEvent, { type: "user_message" }> {
   return {
     type: "user_message",
     content: "hello",
@@ -205,6 +205,56 @@ const baseTimelineProps = {
   onLoadOlder: () => {},
   onOpenMedia: () => {},
 } as const;
+
+describe("prompt queue status", () => {
+  it("hides pending messages and leaves the running message undecorated", () => {
+    const events: SandboxEvent[] = [
+      { ...event(), messageId: "running", content: "First" },
+      { ...event(), messageId: "next", content: "Second", timestamp: 2 },
+      { ...event(), messageId: "later", content: "Third", timestamp: 3 },
+    ];
+    render(
+      <SessionTimeline
+        {...baseTimelineProps}
+        events={events}
+        promptQueue={[
+          { messageId: "running", content: "First", status: "processing" },
+          { messageId: "next", content: "Second", status: "pending" },
+          { messageId: "later", content: "Third", status: "pending" },
+        ]}
+      />
+    );
+    expect(screen.getByText("First")).toBeInTheDocument();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+    expect(screen.queryByText("Second")).not.toBeInTheDocument();
+    expect(screen.queryByText("Third")).not.toBeInTheDocument();
+  });
+
+  it("does not render pending queue entries that are outside timeline replay", () => {
+    render(
+      <SessionTimeline
+        {...baseTimelineProps}
+        events={[{ ...event(), messageId: "canonical", content: "Canonical prompt" }]}
+        promptQueue={[
+          {
+            messageId: "canonical",
+            content: "Canonical prompt",
+            status: "processing",
+          },
+          {
+            messageId: "outside-replay",
+            content: "Queued outside replay",
+            status: "pending",
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getAllByText("Canonical prompt")).toHaveLength(1);
+    expect(screen.queryByText("Queued outside replay")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Prompt queue" })).not.toBeInTheDocument();
+  });
+});
 
 describe("tool call groups", () => {
   it("preserves expanded group and row state when history is prepended", async () => {
