@@ -2,9 +2,9 @@
  * Unit tests for schema migration tracking.
  */
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { applyMigrations, MIGRATIONS, SCHEMA_SQL } from "./schema";
+import { applyMigrations, initSchema, MIGRATIONS, SCHEMA_SQL } from "./schema";
 import type { SqlResult, SqlStorage } from "./sql-storage";
 
 /**
@@ -36,6 +36,35 @@ function createMockSql() {
       queryData.clear();
     },
   };
+}
+
+function createDatabaseSql(db: DatabaseSync): SqlStorage {
+  return {
+    exec(query: string, ...params: unknown[]): SqlResult {
+      const sqliteParams = params as SQLInputValue[];
+      if (/^\s*(?:PRAGMA|SELECT)\b/i.test(query)) {
+        const rows = db.prepare(query).all(...sqliteParams);
+        return { toArray: () => rows, one: () => rows[0] ?? null };
+      }
+      if (params.length > 0) {
+        db.prepare(query).run(...sqliteParams);
+      } else {
+        db.exec(query);
+      }
+      return { toArray: () => [], one: () => null };
+    },
+  };
+}
+
+function expectClientRequestIdIndex(db: DatabaseSync): void {
+  expect(db.prepare("PRAGMA index_list(messages)").all()).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ name: "idx_messages_client_request_id", unique: 1 }),
+    ])
+  );
+  expect(db.prepare("PRAGMA index_info(idx_messages_client_request_id)").all()).toEqual([
+    expect.objectContaining({ name: "client_request_id" }),
+  ]);
 }
 
 describe("applyMigrations", () => {
@@ -253,16 +282,7 @@ describe("applyMigrations", () => {
     expect(typeof migration?.run).toBe("function");
 
     const db = new DatabaseSync(":memory:");
-    const sql: SqlStorage = {
-      exec(query: string): SqlResult {
-        if (/^PRAGMA\s/i.test(query.trim())) {
-          const rows = db.prepare(query).all();
-          return { toArray: () => rows, one: () => rows[0] ?? null };
-        }
-        db.exec(query);
-        return { toArray: () => [], one: () => null };
-      },
-    };
+    const sql = createDatabaseSql(db);
 
     try {
       db.exec(
@@ -319,19 +339,11 @@ describe("applyMigrations", () => {
     )[0];
     expect(messagesTable).toContain("client_request_id TEXT");
     expect(messagesTable).toContain("request_fingerprint TEXT");
-    expect(SCHEMA_SQL).toContain(
-      "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_request_id"
-    );
 
     const migration = MIGRATIONS.find((entry) => entry.id === 40);
     expect(typeof migration?.run).toBe("function");
     const db = new DatabaseSync(":memory:");
-    const sql: SqlStorage = {
-      exec(query: string): SqlResult {
-        db.exec(query);
-        return { toArray: () => [], one: () => null };
-      },
-    };
+    const sql = createDatabaseSql(db);
     try {
       db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY)");
       const run = migration!.run as (sql: SqlStorage) => void;
@@ -343,12 +355,64 @@ describe("applyMigrations", () => {
           expect.objectContaining({ name: "request_fingerprint", type: "TEXT" }),
         ])
       );
+      expectClientRequestIdIndex(db);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("initializes a legacy messages table before creating indexes for new columns", () => {
+    expect(SCHEMA_SQL).not.toMatch(/\bCREATE (?:UNIQUE )?INDEX\b/);
+
+    const db = new DatabaseSync(":memory:");
+    const sql = createDatabaseSql(db);
+    try {
+      db.exec(`CREATE TABLE messages (
+        id TEXT PRIMARY KEY,
+        author_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source TEXT NOT NULL,
+        model TEXT,
+        reasoning_effort TEXT,
+        attachments TEXT,
+        callback_context TEXT,
+        status TEXT DEFAULT 'pending',
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER
+      )`);
+      db.exec(
+        "CREATE TABLE _schema_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)"
+      );
+      const recordMigration = db.prepare(
+        "INSERT INTO _schema_migrations (id, applied_at) VALUES (?, 0)"
+      );
+      for (const migration of MIGRATIONS.filter(({ id }) => id < 40)) {
+        recordMigration.run(migration.id);
+      }
+
+      expect(() => initSchema(sql)).not.toThrow();
+      expect(db.prepare("PRAGMA table_info(messages)").all()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "client_request_id", type: "TEXT" }),
+          expect.objectContaining({ name: "request_fingerprint", type: "TEXT" }),
+          expect.objectContaining({ name: "stop_confirmation_deadline", type: "INTEGER" }),
+        ])
+      );
       expect(
         db
           .prepare("PRAGMA index_list(messages)")
           .all()
-          .some((row) => row.name === "idx_messages_client_request_id")
-      ).toBe(true);
+          .map((row) => row.name)
+      ).toEqual(
+        expect.arrayContaining([
+          "idx_messages_status",
+          "idx_messages_author",
+          "idx_messages_client_request_id",
+        ])
+      );
+      expectClientRequestIdIndex(db);
     } finally {
       db.close();
     }
