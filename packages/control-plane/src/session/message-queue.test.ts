@@ -142,6 +142,7 @@ function buildQueue() {
       () => null as { id: string; created_at: number } | null
     ),
     getNextPendingMessage: vi.fn(() => null as MessageRow | null),
+    startMessageProcessing: vi.fn(),
     updateMessageToProcessing: vi.fn(),
     updateMessageToPending: vi.fn(),
     getParticipantById: vi.fn(() => createParticipant()),
@@ -234,6 +235,7 @@ describe("SessionMessageQueue", () => {
     expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_spawning" });
     expect(h.sandboxLifecycle.spawnSandbox).toHaveBeenCalledTimes(1);
     expect(h.repository.updateMessageToProcessing).not.toHaveBeenCalled();
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
     expect(h.callbackService.notifyStarted).not.toHaveBeenCalled();
   });
 
@@ -417,7 +419,7 @@ describe("SessionMessageQueue", () => {
     );
   });
 
-  it("stores attachments and embeds content-free metadata in the user_message event", async () => {
+  it("stores attachments on the pending message without creating a timeline event", async () => {
     const h = buildQueue();
     h.attachmentRepository.getUnreferenced.mockReturnValue([
       {
@@ -447,23 +449,24 @@ describe("SessionMessageQueue", () => {
           { name: "shot.png", attachmentId: "up-1", mimeType: "image/png" },
         ]),
       }),
-      ["up-1"],
-      expect.objectContaining({ type: "user_message", messageId: expect.any(String) })
+      ["up-1"]
     );
+  });
 
-    expect(h.broadcast).toHaveBeenCalledWith({
-      type: "sandbox_event",
-      event: expect.objectContaining({
-        type: "user_message",
-        attachments: [{ name: "shot.png", mimeType: "image/png", attachmentId: "up-1" }],
-      }),
+  it("does not broadcast a queued follow-up before it starts processing", async () => {
+    const h = buildQueue();
+    h.repository.getProcessingMessage.mockReturnValue({ id: "msg-running" });
+
+    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), {
+      content: "queued follow-up",
     });
-    const storedEvent = JSON.parse(
-      h.repository.createMessageWithAttachments.mock.calls[0][2].data as string
-    );
-    expect(storedEvent.attachments).toEqual([
-      { name: "shot.png", mimeType: "image/png", attachmentId: "up-1" },
-    ]);
+
+    expect(
+      h.broadcast.mock.calls.filter(
+        ([message]) => message.type === "sandbox_event" && message.event.type === "user_message"
+      )
+    ).toHaveLength(0);
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
   });
 
   it("rejects a prompt when its upload loses the atomic claim race", async () => {
@@ -559,20 +562,27 @@ describe("SessionMessageQueue", () => {
     );
   });
 
-  it("omits attachments from the user_message event when none are sent", async () => {
+  it("materializes the user_message at processing start", async () => {
     const h = buildQueue();
+    const sandboxWs = { readyState: 1 } as WebSocket;
+    h.repository.getNextPendingMessage.mockReturnValue(createMessage());
+    h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
 
-    await h.queue.handlePromptMessage({} as WebSocket, createClientInfo(), { content: "hello" });
+    await h.queue.processMessageQueue();
 
-    const broadcastCall = h.broadcast.mock.calls.find(
-      ([message]) =>
-        (message as { type: string; event?: { type?: string } }).type === "sandbox_event" &&
-        (message as { event?: { type?: string } }).event?.type === "user_message"
+    expect(h.repository.startMessageProcessing).toHaveBeenCalledWith(
+      "msg-1",
+      expect.any(Number),
+      expect.objectContaining({
+        type: "user_message",
+        messageId: "msg-1",
+        content: "hello",
+      })
     );
-    expect(broadcastCall).toBeDefined();
-    expect((broadcastCall?.[0] as { event: Record<string, unknown> }).event).not.toHaveProperty(
-      "attachments"
-    );
+    const event = h.repository.startMessageProcessing.mock.calls[0][2];
+    expect(event).not.toHaveProperty("attachments");
+    expect(event.timestamp * 1000).toBe(h.repository.startMessageProcessing.mock.calls[0][1]);
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "sandbox_event", event });
   });
 
   it("uses the canonical profile userId instead of a bot transport identity", async () => {
@@ -584,14 +594,13 @@ describe("SessionMessageQueue", () => {
       canonical_user_id: "user-pat",
     });
 
-    h.participantService.getByUserId.mockReturnValue(participant);
     h.repository.getParticipantById.mockReturnValue(participant);
-    await h.queue.enqueuePromptFromApi({
-      authorId: "slack:U123",
-      canonicalUserId: "user-pat",
-      content: "hello",
-      source: "slack",
-    });
+    h.repository.getNextPendingMessage.mockReturnValue(
+      createMessage({ author_id: participant.id, source: "slack" })
+    );
+    h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
+
+    await h.queue.processMessageQueue();
 
     expect(h.broadcast).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -611,9 +620,10 @@ describe("SessionMessageQueue", () => {
 
     await h.queue.processMessageQueue();
 
-    expect(h.repository.updateMessageToProcessing).toHaveBeenCalledWith(
+    expect(h.repository.startMessageProcessing).toHaveBeenCalledWith(
       "msg-42",
-      expect.any(Number)
+      expect.any(Number),
+      expect.objectContaining({ type: "user_message", messageId: "msg-42" })
     );
     expect(h.wsManager.send).toHaveBeenCalledWith(
       sandboxWs,
@@ -626,7 +636,7 @@ describe("SessionMessageQueue", () => {
     });
   });
 
-  it("requeues a prompt when sandbox send definitively fails", async () => {
+  it("leaves the prompt pending and timeline untouched when sandbox send fails", async () => {
     const h = buildQueue();
     h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-unsent" }));
     h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
@@ -634,7 +644,13 @@ describe("SessionMessageQueue", () => {
 
     await h.queue.processMessageQueue();
 
-    expect(h.repository.updateMessageToPending).toHaveBeenCalledWith("msg-unsent");
+    expect(h.repository.startMessageProcessing).not.toHaveBeenCalled();
+    expect(h.repository.updateMessageToPending).not.toHaveBeenCalled();
+    expect(
+      h.broadcast.mock.calls.filter(
+        ([message]) => message.type === "sandbox_event" && message.event.type === "user_message"
+      )
+    ).toHaveLength(0);
     expect(h.callbackService.notifyStarted).not.toHaveBeenCalled();
     expect(h.sandboxLifecycle.terminateUnresponsiveSandbox).toHaveBeenCalledWith(
       "prompt_dispatch_send_failed"

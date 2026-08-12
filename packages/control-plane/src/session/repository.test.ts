@@ -796,7 +796,7 @@ describe("SessionRepository", () => {
       createdAt: 1000,
     };
 
-    it("claims uploads and creates the message and event in one transaction", () => {
+    it("claims uploads and creates the pending message in one transaction", () => {
       let transactions = 0;
       repo = new SessionRepository(
         mock.sql,
@@ -808,19 +808,13 @@ describe("SessionRepository", () => {
       );
       mock.setDefaultRowsWritten(2);
 
-      repo.createMessageWithAttachments(message, ["up-1", "up-2"], {
-        id: "event-1",
-        type: "user_message",
-        data: "{}",
-        messageId: "msg-1",
-        createdAt: 1000,
-      });
+      repo.createMessageWithAttachments(message, ["up-1", "up-2"]);
 
       expect(transactions).toBe(1);
       expect(mock.calls[0].query).toContain("UPDATE attachments SET message_id");
       expect(mock.calls[0].params).toEqual(["msg-1", "up-1", "up-2"]);
       expect(mock.calls[1].query).toContain("INSERT INTO messages");
-      expect(mock.calls[2].query).toContain("INSERT INTO events");
+      expect(mock.calls).toHaveLength(2);
     });
 
     it("fails before creating the message when not every upload can be claimed", () => {
@@ -833,14 +827,36 @@ describe("SessionRepository", () => {
     });
   });
 
-  describe("updateMessageToProcessing", () => {
-    it("changes status and sets startedAt", () => {
-      repo.updateMessageToProcessing("msg-1", 2000);
+  describe("startMessageProcessing", () => {
+    it("updates processing state and materializes the user event in one transaction", () => {
+      repo.startMessageProcessing("msg-1", 2000, {
+        type: "user_message",
+        content: "Hello",
+        messageId: "msg-1",
+        timestamp: 2,
+        author: { participantId: "p-1", userId: "u-1", name: "User" },
+      });
 
-      expect(mock.calls.length).toBe(1);
+      expect(transactionSyncCalls).toBe(1);
       expect(mock.calls[0].query).toContain("status = 'processing'");
-      expect(mock.calls[0].query).toContain("started_at");
       expect(mock.calls[0].params).toEqual([2000, "msg-1"]);
+      expect(mock.calls[1].query).toContain("INSERT INTO events");
+      expect(mock.calls[1].params.at(-1)).toBe(2000);
+    });
+
+    it("appends the canonical event without updating legacy timeline rows", () => {
+      repo.startMessageProcessing("msg-1", 2000, {
+        type: "user_message",
+        content: "Hello",
+        messageId: "msg-1",
+        timestamp: 2,
+        author: { participantId: "p-1", userId: "u-1", name: "User" },
+      });
+
+      expect(mock.calls).toHaveLength(2);
+      expect(mock.calls[1].query).toContain("INSERT INTO events");
+      expect(mock.calls[1].query).not.toContain("UPDATE events");
+      expect(mock.calls[1].params[0]).toBe("user_message:msg-1");
     });
   });
 

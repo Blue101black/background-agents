@@ -918,12 +918,25 @@ export class SessionRepository {
     });
   }
 
-  updateMessageToProcessing(messageId: string, startedAt: number): void {
-    this.sql.exec(
-      `UPDATE messages SET status = 'processing', started_at = ? WHERE id = ?`,
-      startedAt,
-      messageId
-    );
+  startMessageProcessing(
+    messageId: string,
+    startedAt: number,
+    userMessageEvent: Extract<SandboxEvent, { type: "user_message" }>
+  ): void {
+    this.transactionSync(() => {
+      this.sql.exec(
+        `UPDATE messages SET status = 'processing', started_at = ? WHERE id = ?`,
+        startedAt,
+        messageId
+      );
+      this.createEvent({
+        id: `user_message:${messageId}`,
+        type: "user_message",
+        data: JSON.stringify(userMessageEvent),
+        messageId,
+        createdAt: startedAt,
+      });
+    });
   }
 
   updateMessageToPending(messageId: string): void {
