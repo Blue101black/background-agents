@@ -54,11 +54,63 @@ describe("ChildSessionsSection", () => {
     );
 
     const toggle = await screen.findByRole("button", { name: "Sub-tasks" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls");
     expect(screen.queryByRole("link", { name: /Child session/ })).not.toBeInTheDocument();
 
     await user.click(toggle);
 
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("link", { name: /Child session/ })).toBeInTheDocument();
+  });
+
+  it("collapses sub-tasks when navigating to another session", async () => {
+    const user = userEvent.setup();
+    const swrConfig = {
+      fallback: Object.fromEntries(
+        ["parent-a", "parent-b"].map((sessionId) => [
+          `/api/sessions/${sessionId}/children`,
+          {
+            children: [
+              {
+                id: `child-${sessionId}`,
+                title: `Child ${sessionId}`,
+                repoOwner: "owner",
+                repoName: "repo",
+                parentSessionId: sessionId,
+                spawnSource: "agent",
+                spawnDepth: 1,
+                status: "completed",
+                createdAt: 1000,
+                updatedAt: 2000,
+              },
+            ],
+          },
+        ])
+      ),
+      provider: () => new Map(),
+      revalidateOnFocus: false,
+    };
+    const { rerender } = render(
+      <SWRConfig value={swrConfig}>
+        <ChildSessionsSection sessionId="parent-a" />
+      </SWRConfig>
+    );
+    const toggle = await screen.findByRole("button", { name: "Sub-tasks" });
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    rerender(
+      <SWRConfig value={swrConfig}>
+        <ChildSessionsSection sessionId="parent-b" />
+      </SWRConfig>
+    );
+
+    expect(await screen.findByRole("button", { name: "Sub-tasks" })).toHaveAttribute(
+      "aria-expanded",
+      "false"
+    );
+    expect(screen.queryByRole("link", { name: /Child parent-b/ })).not.toBeInTheDocument();
   });
 
   it("renders a child's pull request state icon", async () => {
