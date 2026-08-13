@@ -264,7 +264,7 @@ describe("tool call groups", () => {
     ];
     const { rerender } = render(<SessionTimeline {...baseTimelineProps} events={readEvents} />);
 
-    await userEvent.click(screen.getByRole("button", { name: /Read2 files/i }));
+    await userEvent.click(screen.getByRole("button", { name: /Read 2 files/i }));
     await userEvent.click(screen.getByRole("button", { name: /Read one\.ts/i }));
     expect(screen.getByText("Arguments:")).toBeInTheDocument();
 
@@ -927,7 +927,7 @@ describe("task activity grouping", () => {
     };
     const view = render(<SessionTimeline {...props} events={initial} />);
 
-    await user.click(screen.getByRole("button", { name: /Bash2 commands/ }));
+    await user.click(screen.getByRole("button", { name: /Bash 2 commands/ }));
     expect(screen.getByText(/Bash first/)).toBeInTheDocument();
     view.rerender(
       <SessionTimeline
@@ -971,7 +971,7 @@ describe("task activity grouping", () => {
       />
     );
 
-    await user.click(screen.getByRole("button", { name: /Bash2 commands/ }));
+    await user.click(screen.getByRole("button", { name: /Bash 2 commands/ }));
     expect(screen.getByText(/Bash first/)).toBeInTheDocument();
     expect(screen.getByText(/Bash second/)).toBeInTheDocument();
     expect(consoleError.mock.calls.some((call) => String(call[0]).includes("same key"))).toBe(
