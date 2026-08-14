@@ -70,6 +70,14 @@ export interface SandboxCircuitBreakerState {
   last_spawn_failure: number | null;
 }
 
+interface RecordedMessageCompletion {
+  messageId: string;
+  messageCreatedAt: number;
+  messageStartedAt: number | null;
+  completedAt: number;
+  status: "completed" | "failed";
+}
+
 /**
  * Data for upserting a session.
  */
@@ -946,19 +954,43 @@ export class SessionRepository {
     );
   }
 
-  updateMessageCompletion(
-    messageId: string,
-    status: MessageStatus,
+  recordMessageCompletion(
+    event: ExecutionCompleteEvent,
     completedAt: number,
-    errorMessage: string | null = null
-  ): void {
-    this.sql.exec(
-      `UPDATE messages SET status = ?, completed_at = ?, error_message = ? WHERE id = ?`,
-      status,
-      completedAt,
-      errorMessage,
-      messageId
-    );
+    expectedStatus: "pending" | "processing"
+  ): RecordedMessageCompletion | null {
+    return this.transactionSync(() => {
+      const result = this.sql.exec(
+        `SELECT status, created_at, started_at FROM messages WHERE id = ?`,
+        event.messageId
+      );
+      const message = (
+        result.toArray() as Array<{
+          status: MessageStatus;
+          created_at: number;
+          started_at: number | null;
+        }>
+      )[0];
+      if (!message || message.status !== expectedStatus) return null;
+
+      const status = event.success ? "completed" : "failed";
+      this.sql.exec(
+        `UPDATE messages SET status = ?, completed_at = ?, error_message = ? WHERE id = ?`,
+        status,
+        completedAt,
+        event.success ? null : (event.error ?? null),
+        event.messageId
+      );
+      this.upsertEventByMessageId("execution_complete", event.messageId, event, completedAt);
+
+      return {
+        messageId: event.messageId,
+        messageCreatedAt: message.created_at,
+        messageStartedAt: message.started_at,
+        completedAt,
+        status,
+      };
+    });
   }
 
   listPendingMessagesWithCreatedAt(): Array<{ id: string; created_at: number }> {
@@ -966,17 +998,6 @@ export class SessionRepository {
       `SELECT id, created_at FROM messages WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC`
     );
     return result.toArray() as Array<{ id: string; created_at: number }>;
-  }
-
-  getMessageTimestamps(
-    messageId: string
-  ): { created_at: number; started_at: number | null } | null {
-    const result = this.sql.exec(
-      `SELECT created_at, started_at FROM messages WHERE id = ?`,
-      messageId
-    );
-    const rows = result.toArray() as Array<{ created_at: number; started_at: number | null }>;
-    return rows[0] ?? null;
   }
 
   listMessages(options: ListMessagesOptions): MessageRow[] {
@@ -1077,14 +1098,6 @@ export class SessionRepository {
       messageId,
       createdAt
     );
-  }
-
-  upsertExecutionCompleteEvent(
-    messageId: string,
-    event: ExecutionCompleteEvent,
-    createdAt: number
-  ): void {
-    this.upsertEventByMessageId("execution_complete", messageId, event, createdAt);
   }
 
   listEventPage(options: ListEventPageOptions): EventPage {

@@ -3,6 +3,7 @@ import { fingerprintWebPrompt, SessionMessageQueue } from "./message-queue";
 import { AttachmentClaimConflictError } from "./session-attachment-repository";
 import type { SessionAttachmentRepository } from "./session-attachment-repository";
 import type { ServerMessage } from "@open-inspect/shared/types/server-messages";
+import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/prompts";
 import type { ClientInfo } from "../types";
 import type { MessageRow, ParticipantRow, SessionRow, SessionAttachmentRow } from "./types";
 import type { SessionRepository } from "./repository";
@@ -11,7 +12,6 @@ import type { ParticipantService } from "./participant-service";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import { createEarliestAlarmScheduler } from "./alarm/scheduler";
 import type { SessionStatusService } from "./session-status-service";
-import { MAX_UNFINISHED_PROMPTS } from "@open-inspect/shared/types/websocket";
 
 function createParticipant(overrides: Partial<ParticipantRow> = {}): ParticipantRow {
   return {
@@ -148,10 +148,15 @@ function buildQueue() {
     getParticipantById: vi.fn(() => createParticipant()),
     getSession: vi.fn(() => createSession()),
     updateParticipantCoalesce: vi.fn(),
-    updateMessageCompletion: vi.fn(),
+    recordMessageCompletion: vi.fn((event: { messageId: string }, completedAt: number) => ({
+      messageId: event.messageId,
+      messageCreatedAt: 1000,
+      messageStartedAt: 1100,
+      completedAt,
+      status: "failed" as const,
+    })),
     markMessageAwaitingStopConfirmation: vi.fn(),
     listPendingMessagesWithCreatedAt: vi.fn((): Array<{ id: string; created_at: number }> => []),
-    upsertExecutionCompleteEvent: vi.fn(),
   };
 
   const attachmentRepository = {
@@ -187,7 +192,7 @@ function buildQueue() {
   const waitUntil = vi.fn();
   const getAlarm = vi.fn(async () => null as number | null);
   const setAlarm = vi.fn(async (_timestamp: number) => {});
-  const recordTerminalMessage = vi.fn(async () => {});
+  const projectTerminalMessage = vi.fn(async () => {});
 
   const queue = new SessionMessageQueue(
     { waitUntil, storage: { getAlarm, setAlarm } } as unknown as DurableObjectState,
@@ -199,12 +204,12 @@ function buildQueue() {
     participantService as unknown as ParticipantService,
     callbackService as unknown as CallbackNotificationService,
     sessionStatus as unknown as SessionStatusService,
+    projectTerminalMessage,
     sandboxLifecycle,
     null,
     "github",
     createEarliestAlarmScheduler({ getAlarm, setAlarm }),
-    EXECUTION_TIMEOUT_MS,
-    recordTerminalMessage
+    EXECUTION_TIMEOUT_MS
   );
 
   return {
@@ -220,7 +225,7 @@ function buildQueue() {
     getAlarm,
     setAlarm,
     callbackService,
-    recordTerminalMessage,
+    projectTerminalMessage,
     log,
   };
 }
@@ -847,48 +852,48 @@ describe("SessionMessageQueue", () => {
     });
   });
 
-  it("marks processing message failed and broadcasts synthetic completion on stop", async () => {
+  it("delegates stop finalization before broadcasting idle and stopping the sandbox", async () => {
     const h = buildQueue();
     const sandboxWs = { readyState: 1 } as WebSocket;
-    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue(
-      createMessage({ id: "msg-9", status: "processing", created_at: 900 })
-    );
     h.wsManager.getSandboxSocket.mockReturnValue(sandboxWs);
-    h.recordTerminalMessage.mockReturnValue(new Promise<void>(() => {}));
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-9",
+      created_at: 900,
+    });
 
     await h.queue.stopExecution();
 
-    expect(h.repository.updateMessageCompletion).toHaveBeenCalledWith(
-      "msg-9",
-      "failed",
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "execution_complete",
+        messageId: "msg-9",
+        success: false,
+        error: "Execution was stopped",
+      }),
       expect.any(Number),
-      "Execution was stopped"
+      "processing"
     );
     expect(h.repository.markMessageAwaitingStopConfirmation).toHaveBeenCalledWith(
       "msg-9",
       expect.any(Number)
     );
-    expect(h.repository.upsertExecutionCompleteEvent).toHaveBeenCalledWith(
-      "msg-9",
-      expect.objectContaining({ type: "execution_complete", success: false }),
-      expect.any(Number)
-    );
-    expect(h.recordTerminalMessage).toHaveBeenCalledWith({
-      messageId: "msg-9",
-      messageCreatedAt: 900,
-      terminalMessageCompletedAt: expect.any(Number),
-    });
     expect(h.broadcast).toHaveBeenCalledWith({ type: "processing_status", isProcessing: false });
     expect(h.wsManager.send).toHaveBeenCalledWith(sandboxWs, { type: "stop" });
-    expect(h.waitUntil).toHaveBeenCalledTimes(2);
-    expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
+    expect(h.repository.recordMessageCompletion.mock.invocationCallOrder[0]).toBeLessThan(
+      h.repository.markMessageAwaitingStopConfirmation.mock.invocationCallOrder[0]
+    );
+    expect(h.projectTerminalMessage).toHaveBeenCalledWith("msg-9", 1000, expect.any(Number));
+    expect(
+      h.repository.markMessageAwaitingStopConfirmation.mock.invocationCallOrder[0]
+    ).toBeLessThan(h.wsManager.send.mock.invocationCallOrder[0]);
   });
 
   it("waits for sandbox stop confirmation before dispatching the next prompt", async () => {
     const h = buildQueue();
-    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue(
-      createMessage({ id: "msg-running", status: "processing" })
-    );
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-running",
+      created_at: 900,
+    });
     h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-next" }));
     h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
 
@@ -908,9 +913,10 @@ describe("SessionMessageQueue", () => {
 
   it("terminates the sandbox and resumes safely when stop cannot be sent", async () => {
     const h = buildQueue();
-    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue(
-      createMessage({ id: "msg-running", status: "processing" })
-    );
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-running",
+      created_at: 900,
+    });
     h.repository.getNextPendingMessage.mockReturnValue(createMessage({ id: "msg-next" }));
     h.wsManager.getSandboxSocket.mockReturnValue(null);
 
@@ -924,9 +930,10 @@ describe("SessionMessageQueue", () => {
 
   it("terminates the sandbox when the connected socket rejects the stop send", async () => {
     const h = buildQueue();
-    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue(
-      createMessage({ id: "msg-running", status: "processing" })
-    );
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-running",
+      created_at: 900,
+    });
     h.wsManager.getSandboxSocket.mockReturnValue({ readyState: 1 } as WebSocket);
     h.wsManager.send.mockReturnValue(false);
 
@@ -984,9 +991,19 @@ describe("SessionMessageQueue", () => {
       id: "msg-10",
       created_at: 900,
     });
-
     await h.queue.stopExecution({ suppressStatusReconcile: true });
 
+    expect(h.sessionStatus.reconcileAfterExecution).not.toHaveBeenCalled();
+  });
+
+  it("does not finalize or stop when no message is processing", async () => {
+    const h = buildQueue();
+
+    await h.queue.stopExecution();
+    await h.queue.failStuckProcessingMessage();
+
+    expect(h.repository.recordMessageCompletion).not.toHaveBeenCalled();
+    expect(h.wsManager.send).not.toHaveBeenCalledWith(expect.anything(), { type: "stop" });
     expect(h.sessionStatus.reconcileAfterExecution).not.toHaveBeenCalled();
   });
 
@@ -995,53 +1012,48 @@ describe("SessionMessageQueue", () => {
     h.repository.listPendingMessagesWithCreatedAt.mockReturnValue([
       { id: "msg-pending", created_at: 700 },
     ]);
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-processing",
+      created_at: 800,
+    });
 
     h.queue.cancelExecution();
 
-    expect(h.repository.upsertExecutionCompleteEvent).toHaveBeenCalledWith(
-      "msg-pending",
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: "execution_complete",
         messageId: "msg-pending",
-        success: false,
         error: "Execution was cancelled before it started",
       }),
-      expect.any(Number)
-    );
-    expect(h.callbackService.notifyComplete).toHaveBeenCalledWith(
-      "msg-pending",
-      false,
-      "Execution was cancelled before it started"
-    );
-    expect(h.repository.updateMessageCompletion).toHaveBeenCalledWith(
-      "msg-pending",
-      "failed",
       expect.any(Number),
-      "Execution was cancelled before it started"
+      "pending"
     );
-    expect(h.recordTerminalMessage).toHaveBeenCalledWith({
-      messageId: "msg-pending",
-      messageCreatedAt: 700,
-      terminalMessageCompletedAt: expect.any(Number),
-    });
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "msg-processing",
+        error: "Execution was cancelled",
+      }),
+      expect.any(Number),
+      "processing"
+    );
   });
 
   it("reconciles session status when failing a stuck processing message", async () => {
     const h = buildQueue();
-    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue(
-      createMessage({ id: "msg-timeout", status: "processing", created_at: 800 })
-    );
-    h.recordTerminalMessage.mockReturnValue(new Promise<void>(() => {}));
-
+    h.repository.getProcessingMessageWithCreatedAt.mockReturnValue({
+      id: "msg-timeout",
+      created_at: 800,
+    });
     await h.queue.failStuckProcessingMessage();
 
+    expect(h.repository.recordMessageCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messageId: "msg-timeout",
+        error: "Execution timed out (stuck processing)",
+      }),
+      expect.any(Number),
+      "processing"
+    );
     expect(h.sessionStatus.reconcileAfterExecution).toHaveBeenCalledWith(false);
-    expect(h.recordTerminalMessage).toHaveBeenCalledWith({
-      messageId: "msg-timeout",
-      messageCreatedAt: 800,
-      terminalMessageCompletedAt: expect.any(Number),
-    });
-    expect(h.waitUntil).toHaveBeenCalledTimes(2);
   });
 
   describe("enqueuePromptFromApi", () => {

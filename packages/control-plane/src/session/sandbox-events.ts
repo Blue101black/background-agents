@@ -11,7 +11,6 @@ import type { SessionMessenger } from "./messenger";
 import type { SessionStatusService } from "./session-status-service";
 import type { SessionWebSocketManager } from "./websocket-manager";
 import type { SessionTitleUpdateOptions, SessionTitleUpdateResult } from "./title";
-import type { TerminalMessageProjectionInput } from "./terminal-message-projection";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
 type SandboxEventWithAck = SandboxEvent & { ackId?: string };
@@ -48,12 +47,16 @@ export class SessionSandboxEventProcessor {
       options?: SessionTitleUpdateOptions
     ) => SessionTitleUpdateResult,
     private readonly triggerSnapshot: (reason: string) => Promise<void>,
+    private readonly projectTerminalMessage: (
+      messageId: string,
+      messageCreatedAt: number,
+      completedAt: number
+    ) => Promise<void>,
     private readonly statusService: SessionStatusService,
     private readonly updateLastActivity: (timestamp: number) => void,
     private readonly scheduleInactivityCheck: () => Promise<void>,
     private readonly processMessageQueue: () => Promise<void>,
-    private readonly broadcastPromptQueue: () => void,
-    private readonly recordTerminalMessage: (input: TerminalMessageProjectionInput) => Promise<void>
+    private readonly broadcastPromptQueue: () => void
   ) {}
 
   private get log(): Logger {
@@ -200,46 +203,32 @@ export class SessionSandboxEventProcessor {
     }
 
     if (event.type === "execution_complete") {
-      const completionMessageId = messageId;
-      const isStillProcessing =
-        completionMessageId != null && processingMessage?.id === completionMessageId;
-
-      if (isStillProcessing) {
-        this.repository.upsertExecutionCompleteEvent(completionMessageId, event, now);
-        const status = event.success ? "completed" : "failed";
-        this.repository.updateMessageCompletion(
-          completionMessageId,
-          status,
-          now,
-          event.success ? null : (event.error ?? null)
+      const completion =
+        processingMessage?.id === event.messageId
+          ? this.repository.recordMessageCompletion(event, now, "processing")
+          : null;
+      if (completion) {
+        await this.projectTerminalMessage(
+          completion.messageId,
+          completion.messageCreatedAt,
+          completion.completedAt
         );
-
-        const timestamps = this.repository.getMessageTimestamps(completionMessageId);
-        if (timestamps) {
-          await this.recordTerminalMessage({
-            messageId: completionMessageId,
-            messageCreatedAt: timestamps.created_at,
-            terminalMessageCompletedAt: now,
-          });
-        }
-        const totalDurationMs = timestamps ? now - timestamps.created_at : undefined;
+        const totalDurationMs = now - completion.messageCreatedAt;
         const processingDurationMs =
-          timestamps?.started_at != null ? now - timestamps.started_at : undefined;
+          completion.messageStartedAt != null ? now - completion.messageStartedAt : undefined;
         const queueDurationMs =
-          timestamps?.started_at != null
-            ? timestamps.started_at - timestamps.created_at
+          completion.messageStartedAt != null
+            ? completion.messageStartedAt - completion.messageCreatedAt
             : undefined;
-
         this.log.info("prompt.complete", {
           event: "prompt.complete",
-          message_id: completionMessageId,
+          message_id: event.messageId,
           outcome: event.success ? "success" : "failure",
-          message_status: status,
+          message_status: completion.status,
           total_duration_ms: totalDurationMs,
           processing_duration_ms: processingDurationMs,
           queue_duration_ms: queueDurationMs,
         });
-
         this.messenger.broadcast({ type: "sandbox_event", event });
         this.messenger.broadcast({
           type: "processing_status",
@@ -247,17 +236,14 @@ export class SessionSandboxEventProcessor {
         });
         this.broadcastPromptQueue();
         this.ctx.waitUntil(
-          this.callbackService.notifyComplete(completionMessageId, event.success, event.error)
+          this.callbackService.notifyComplete(event.messageId, event.success, event.error)
         );
-
         await this.statusService.reconcileAfterExecution(event.success);
       } else {
-        if (completionMessageId) {
-          this.repository.clearMessageAwaitingStopConfirmation(completionMessageId);
-        }
+        this.repository.clearMessageAwaitingStopConfirmation(event.messageId);
         this.log.info("prompt.complete", {
           event: "prompt.complete",
-          message_id: completionMessageId,
+          message_id: event.messageId,
           outcome: "already_stopped",
         });
       }
