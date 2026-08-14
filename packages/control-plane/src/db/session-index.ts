@@ -6,6 +6,10 @@ import type {
   SessionStatus,
   SpawnSource,
 } from "@open-inspect/shared/types/sessions";
+import {
+  DEFAULT_SESSION_LIST_LIMIT,
+  DEFAULT_SESSION_LIST_OFFSET,
+} from "@open-inspect/shared/session-list-query";
 import type { SessionListRepository } from "@open-inspect/shared/types/repositories";
 import { SessionPullRequestStore } from "./session-pull-request-store";
 import type { SqlDatabase } from "./sql-database";
@@ -334,8 +338,8 @@ export class SessionIndexStore {
       repoOwner,
       repoName,
       createdByUserIds,
-      limit = 50,
-      offset = 0,
+      limit = DEFAULT_SESSION_LIST_LIMIT,
+      offset = DEFAULT_SESSION_LIST_OFFSET,
       viewerUserId,
     } = options;
 
