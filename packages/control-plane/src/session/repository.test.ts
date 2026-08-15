@@ -690,6 +690,50 @@ describe("SessionRepository", () => {
     });
   });
 
+  describe("cancelPendingMessage", () => {
+    const statusQuery = `SELECT status, source, callback_context FROM messages WHERE id = ?`;
+
+    it("atomically releases attachments and deletes a pending message", () => {
+      mock.setData(statusQuery, [{ status: "pending", source: "web", callback_context: null }]);
+      mock.setDefaultRowsWritten(1);
+
+      expect(repo.cancelPendingMessage("msg-1")).toBe(true);
+
+      expect(transactionSyncCalls).toBe(1);
+      expect(mock.calls[1]).toMatchObject({
+        query: expect.stringContaining("UPDATE attachments SET message_id = NULL"),
+        params: ["msg-1"],
+      });
+      expect(mock.calls[2]).toMatchObject({
+        query: expect.stringContaining("DELETE FROM messages"),
+        params: ["msg-1"],
+      });
+    });
+
+    it("does not change a processing message", () => {
+      mock.setData(statusQuery, [{ status: "processing", source: "web", callback_context: null }]);
+
+      expect(repo.cancelPendingMessage("msg-1")).toBe(false);
+      expect(mock.calls).toHaveLength(1);
+    });
+
+    it("does not delete a non-web prompt that may require a callback", () => {
+      mock.setData(statusQuery, [{ status: "pending", source: "linear", callback_context: null }]);
+
+      expect(repo.cancelPendingMessage("msg-1")).toBe(false);
+      expect(mock.calls).toHaveLength(1);
+    });
+
+    it("does not delete a prompt with a completion callback", () => {
+      mock.setData(statusQuery, [
+        { status: "pending", source: "web", callback_context: '{"channel":"C1"}' },
+      ]);
+
+      expect(repo.cancelPendingMessage("msg-1")).toBe(false);
+      expect(mock.calls).toHaveLength(1);
+    });
+  });
+
   describe("startMessageProcessing", () => {
     it("updates processing state and materializes the user event in one transaction", () => {
       repo.startMessageProcessing("msg-1", 2000, {
