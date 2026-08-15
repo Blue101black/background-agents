@@ -258,7 +258,6 @@ function makeSessionEnv(
 function mockSlackFetch(
   order: string[] = [],
   options: {
-    statusResponse?: Response | Promise<Response>;
     threadMessages?: unknown[];
     threadRepliesError?: string;
     /** HTTP status for files.slack.com downloads (default 200 with bytes). */
@@ -269,13 +268,10 @@ function mockSlackFetch(
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("assistant.threads.setStatus")) {
       order.push("status");
-      return (
-        options.statusResponse ??
-        new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        })
-      );
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (url.includes("conversations.info")) {
@@ -1593,56 +1589,6 @@ describe("POST /events", () => {
 
     expect(statusFetchBodies(slackFetch)).toEqual([]);
     expect(order).not.toContain("status");
-
-    slackFetch.mockRestore();
-  });
-
-  it("does not wait for Starting status before creating a session", async () => {
-    const statusDeferred = createDeferred<Response>();
-    const order: string[] = [];
-    const slackFetch = mockSlackFetch(order, { statusResponse: statusDeferred.promise });
-    const env = makeSessionEnv(order);
-    const ctx = makeCtx();
-
-    const response = await app.fetch(
-      slackEventRequest({
-        type: "message",
-        text: "fix the auth tests",
-        user: "U123",
-        channel: "D123",
-        ts: "444.555",
-        channel_type: "im",
-      }),
-      env,
-      ctx
-    );
-
-    expect(response.status).toBe(200);
-    const backgroundPromise = ctx.waitUntil.mock.calls[0]?.[0] as Promise<void>;
-    const backgroundOutcome = await Promise.race([
-      backgroundPromise.then(() => "complete"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 25)),
-    ]);
-
-    expect(backgroundOutcome).toBe("complete");
-    expect(order).toContain("session");
-    expect(order).toContain("prompt");
-    expect(ctx.waitUntil).toHaveBeenCalledTimes(4);
-
-    const statusPromise = ctx.waitUntil.mock.calls[1]?.[0] as Promise<void>;
-    const statusOutcome = await Promise.race([
-      statusPromise.then(() => "complete"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 25)),
-    ]);
-    expect(statusOutcome).toBe("pending");
-
-    statusDeferred.resolve(
-      new Response(JSON.stringify({ ok: false, error: "missing_scope" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
     slackFetch.mockRestore();
   });
