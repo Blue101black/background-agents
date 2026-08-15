@@ -56,6 +56,8 @@ import type { Env } from "../types";
 import type { SqlDatabase } from "../db/sql-database";
 import { initializeSession } from "../session/initialize";
 import { resolveSessionScopedSettings } from "../session/integration-settings-resolution";
+import { resolveManagedSkills } from "../session/skill-resolution";
+import { managedSkillsEnabled } from "../skills/feature";
 import type { EnqueuePromptRequest } from "../session/enqueue-prompt-contract";
 import { resolveAutomationRepositories } from "../automation/repository";
 import { resolveAutomationSessionTarget } from "../automation/session-target";
@@ -1358,6 +1360,18 @@ export class SchedulerDO extends DurableObject<Env> {
       scopeMembers,
       target.environmentId
     );
+    // Automation runs use all target-applicable shared skills. Personal
+    // profiles are interactive-user choices and are not automation policy.
+    const managedSkillsManifest = await resolveManagedSkills(
+      this.db,
+      {
+        repositories: scopeMembers,
+        environmentId: target.environmentId,
+      },
+      { mode: "all" },
+      userId,
+      managedSkillsEnabled(this.env)
+    );
 
     await initializeSession(
       this.env,
@@ -1378,6 +1392,7 @@ export class SchedulerDO extends DurableObject<Env> {
         spawnDepth: 0,
         automationId: automation.id,
         automationRunId: run.id,
+        managedSkillsManifest,
       },
       ctx
     );
