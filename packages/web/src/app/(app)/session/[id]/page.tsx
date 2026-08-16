@@ -710,6 +710,7 @@ function usePromptInput(
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const submitInFlightRef = useRef(false);
+  const restoreFocusAfterSubmitRef = useRef(false);
   const retryRequestRef = useRef<PromptRequestIdentity | null>(null);
   const attachmentDraftSignature = sessionAttachments.attachments
     .map((attachment) => attachment.id)
@@ -744,6 +745,7 @@ function usePromptInput(
     }
 
     submitInFlightRef.current = true;
+    restoreFocusAfterSubmitRef.current = document.activeElement === inputRef.current;
     setIsSubmitting(true);
     setSubmitError(null);
     try {
@@ -796,6 +798,12 @@ function usePromptInput(
     } finally {
       submitInFlightRef.current = false;
       setIsSubmitting(false);
+      if (restoreFocusAfterSubmitRef.current) {
+        restoreFocusAfterSubmitRef.current = false;
+        requestAnimationFrame(() => {
+          if (document.activeElement === document.body) inputRef.current?.focus();
+        });
+      }
     }
   };
 
