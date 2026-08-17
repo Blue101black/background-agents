@@ -21,7 +21,8 @@ function streamingMutationRequest(size: number, cookie?: string): NextRequest {
 }
 
 describe("settingsProxy", () => {
-  const { GET, POST } = settingsProxy(() => "/settings", "settings");
+  const { GET, POST, PUT } = settingsProxy(() => "/settings", "settings");
+  const context = { params: Promise.resolve(undefined) };
 
   beforeEach(() => vi.resetAllMocks());
 
@@ -38,6 +39,31 @@ describe("settingsProxy", () => {
     expect(controlPlaneUserFetch).toHaveBeenCalledWith("/settings", undefined);
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("forwards If-Match and non-success responses without interpretation", async () => {
+    vi.mocked(controlPlaneUserFetch).mockResolvedValue(
+      Response.json({ error: "Revision conflict" }, { status: 412 })
+    );
+    const request = new NextRequest("http://localhost/api/settings", {
+      method: "PUT",
+      headers: {
+        Cookie: "__Secure-openinspect.session_token=session.signature",
+        "If-Match": 'W/"revision-2"',
+      },
+      body: JSON.stringify({ enabled: true }),
+    });
+
+    const response = await PUT(request, context);
+
+    expect(controlPlaneUserFetch).toHaveBeenCalledWith("/settings", {
+      method: "PUT",
+      headers: { "If-Match": 'W/"revision-2"' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(response.status).toBe(412);
+    await expect(response.json()).resolves.toEqual({ error: "Revision conflict" });
   });
 
   it("delegates authentication before malformed mutation JSON is interpreted", async () => {
