@@ -8,6 +8,10 @@
  */
 
 import { computeHmacHex } from "@open-inspect/shared/auth";
+import {
+  linearCompletionCallbackPayloadSchema,
+  linearToolCallCallbackPayloadSchema,
+} from "@open-inspect/shared/types/session-api";
 import { callbackSigningSecret, type CallbackDestination } from "../auth/service/callback-signing";
 import type { Logger } from "../logger";
 import { deliverWithRetry } from "./callback-delivery";
@@ -56,6 +60,7 @@ export interface CallbackServiceDeps {
  * single duplicate Linear/Slack activity, not data loss.
  */
 const NOTIFIED_CALL_IDS_CAP = 500;
+const EMPTY_TOOL_ARGS: Record<string, unknown> = {};
 
 interface CallbackDeliveryResult {
   delivered: boolean;
@@ -181,12 +186,12 @@ export class CallbackNotificationService {
         return;
       }
 
-      const context = JSON.parse(message.callback_context);
-      source = context.source === "automation" ? "automation" : (message.source ?? null);
+      const rawContext = JSON.parse(message.callback_context);
+      source = rawContext.source === "automation" ? "automation" : (message.source ?? null);
 
       // Route automation callbacks to SchedulerDO (different URL + payload).
       if (source === "automation") {
-        result = await this.notifyAutomationComplete(context, success, error, messageId);
+        result = await this.notifyAutomationComplete(rawContext, success, error, messageId);
         return;
       }
 
@@ -201,14 +206,23 @@ export class CallbackNotificationService {
       }
 
       const timestamp = Date.now();
-      const payloadData = {
+      const callbackData = {
         sessionId,
         messageId,
         success,
         ...(error != null ? { error } : {}),
         timestamp,
-        context,
+        context: rawContext,
       };
+      const parsedCallback =
+        source === "linear"
+          ? linearCompletionCallbackPayloadSchema.safeParse(callbackData)
+          : undefined;
+      if (parsedCallback && !parsedCallback.success) {
+        result.rejectReason = "invalid_payload";
+        return;
+      }
+      const payloadData = parsedCallback?.data ?? callbackData;
       const signature = await this.signPayload(payloadData, secret);
       const payload = { ...payloadData, signature };
       result = await deliverWithRetry(
@@ -341,10 +355,8 @@ export class CallbackNotificationService {
     // a later event for the same callId can retry.
     if (callId && this.notifiedCallIds.has(callId)) return;
 
-    // Throttle: max 1 per 3 seconds
+    // Use one timestamp for validation, throttling, and the callback payload.
     const now = Date.now();
-    if (now - this._lastToolCallCallbackTs < 3000) return;
-    this._lastToolCallCallbackTs = now;
 
     const tool = event.tool ?? "unknown";
 
@@ -396,18 +408,36 @@ export class CallbackNotificationService {
     }
 
     const sessionId = this.getSessionId();
-    const context = JSON.parse(message.callback_context);
+    const rawContext = JSON.parse(message.callback_context);
 
-    const payloadData = {
+    const callbackData = {
       sessionId,
       tool,
-      args: event.args ?? {},
+      args: source === "linear" ? event.args : (event.args ?? EMPTY_TOOL_ARGS),
       callId,
       status: event.status,
       timestamp: now,
-      context,
+      context: rawContext,
     };
+    const parsedPayload =
+      source === "linear" ? linearToolCallCallbackPayloadSchema.safeParse(callbackData) : undefined;
+    if (parsedPayload && !parsedPayload.success) {
+      this.log.warn("callback.tool_call", {
+        message_id: messageId,
+        session_id: sessionId,
+        source,
+        tool,
+        outcome: "skipped",
+        skip_reason: "invalid_payload",
+      });
+      return;
+    }
 
+    // Invalid callbacks must not consume the delivery throttle window.
+    if (now - this._lastToolCallCallbackTs < 3000) return;
+    this._lastToolCallCallbackTs = now;
+
+    const payloadData = parsedPayload?.data ?? callbackData;
     const signature = await this.signPayload(payloadData, secret);
     const payload = { ...payloadData, signature };
 
