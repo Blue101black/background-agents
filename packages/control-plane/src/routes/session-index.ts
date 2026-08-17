@@ -13,11 +13,15 @@ import { isCanonicalUserId } from "@open-inspect/shared/user-id";
 import { SessionIndexStore } from "../db/session-index";
 import {
   error,
+  defineRoute,
+  GITHUB_USER_OR_SERVICE_ROUTE,
   json,
   parseJsonBody,
   parsePattern,
+  SCM_AGNOSTIC_HUMAN_USER_ROUTE,
   type RequestContext,
   type Route,
+  type UserRouteContext,
 } from "./shared";
 import type { Env } from "../types";
 import { createLogger } from "../logger";
@@ -108,11 +112,8 @@ async function handleListSessionInbox(
   request: Request,
   _env: Env,
   _match: RegExpMatchArray,
-  ctx: RequestContext
+  ctx: UserRouteContext
 ): Promise<Response> {
-  if (ctx.principal?.kind !== "user") {
-    return error("Human user authentication required", 403);
-  }
   const searchParams = new URL(request.url).searchParams;
   const categoryValue = searchParams.get("category");
   const category =
@@ -190,11 +191,8 @@ async function handlePatchReadState(
   request: Request,
   _env: Env,
   match: RegExpMatchArray,
-  ctx: RequestContext
+  ctx: UserRouteContext
 ): Promise<Response> {
-  if (ctx.principal?.kind !== "user") {
-    return error("Human user authentication required", 403);
-  }
   const sessionId = match.groups?.id;
   if (!sessionId) return error("Session ID required");
 
@@ -241,12 +239,24 @@ async function handleDeleteSession(
 }
 
 export const sessionIndexRoutes: Route[] = [
-  { method: "GET", pattern: parsePattern("/sessions"), handler: handleListSessions },
-  { method: "GET", pattern: parsePattern("/sessions/inbox"), handler: handleListSessionInbox },
-  {
+  defineRoute(GITHUB_USER_OR_SERVICE_ROUTE, {
+    method: "GET",
+    pattern: parsePattern("/sessions"),
+    handler: handleListSessions,
+  }),
+  defineRoute(SCM_AGNOSTIC_HUMAN_USER_ROUTE, {
+    method: "GET",
+    pattern: parsePattern("/sessions/inbox"),
+    handler: handleListSessionInbox,
+  }),
+  defineRoute(SCM_AGNOSTIC_HUMAN_USER_ROUTE, {
     method: "PATCH",
     pattern: parsePattern("/sessions/:id/read-state"),
     handler: handlePatchReadState,
-  },
-  { method: "DELETE", pattern: parsePattern("/sessions/:id"), handler: handleDeleteSession },
+  }),
+  defineRoute(GITHUB_USER_OR_SERVICE_ROUTE, {
+    method: "DELETE",
+    pattern: parsePattern("/sessions/:id"),
+    handler: handleDeleteSession,
+  }),
 ];
