@@ -13,6 +13,7 @@ type SessionRow = {
   base_branch: string | null;
   status: string;
   parent_session_id: string | null;
+  root_session_id: string;
   spawn_source: SpawnSource;
   spawn_depth: number;
   automation_id: string | null;
@@ -197,6 +198,9 @@ class FakeD1Database {
         baseBranch,
         status,
         parentSessionId,
+        rootParentId,
+        topLevelRootId,
+        parentRootLookupId,
         spawnSource,
         spawnDepth,
         automationId,
@@ -209,6 +213,9 @@ class FakeD1Database {
       ] = args as [
         string,
         string | null,
+        string | null,
+        string | null,
+        string,
         string | null,
         string | null,
         string,
@@ -229,6 +236,9 @@ class FakeD1Database {
       // INSERT OR IGNORE — skip if exists
       const inserted = !this.rows.has(id);
       if (inserted) {
+        const rootSessionId = rootParentId
+          ? (this.rows.get(parentRootLookupId!)?.root_session_id ?? id)
+          : topLevelRootId;
         this.rows.set(id, {
           id,
           title,
@@ -239,6 +249,7 @@ class FakeD1Database {
           base_branch: baseBranch,
           status,
           parent_session_id: parentSessionId,
+          root_session_id: rootSessionId,
           spawn_source: spawnSource,
           spawn_depth: spawnDepth,
           automation_id: automationId,
@@ -544,6 +555,7 @@ describe("SessionIndexStore", () => {
     });
 
     it("stores parent fields when provided", async () => {
+      await store.create(makeSession({ id: "parent-1" }));
       const session = makeSession({
         id: "child-1",
         parentSessionId: "parent-1",
