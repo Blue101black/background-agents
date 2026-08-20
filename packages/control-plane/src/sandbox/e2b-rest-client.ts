@@ -23,6 +23,10 @@ const TIMEOUT_KILL_MS = 30_000;
 const TIMEOUT_GET_MS = 15_000;
 const TIMEOUT_SETTTL_MS = 15_000;
 const TIMEOUT_WRITE_FILE_MS = 30_000;
+// A snapshot bakes the build sandbox's filesystem into a reusable template;
+// larger than the other calls because it copies the whole prebuilt filesystem.
+const TIMEOUT_SNAPSHOT_MS = 180_000;
+const TIMEOUT_DELETE_TEMPLATE_MS = 30_000;
 
 const e2bSandboxDetailSchema = z.object({
   sandboxID: z.string(),
@@ -55,6 +59,20 @@ const e2bErrorBodySchema = z.object({
 });
 
 export type E2BErrorBody = z.infer<typeof e2bErrorBodySchema>;
+
+/**
+ * Response of `POST /sandboxes/{id}/snapshots`. E2B bakes the sandbox's current
+ * filesystem and live process state into a reusable "snapshot template" whose
+ * id doubles as a `templateID`. The E2B launcher is deliberately snapshotted
+ * while waiting for fresh session env, so many sandboxes can spawn from one
+ * snapshot. `snapshotID` includes the build tag (e.g. `abc123:default`).
+ */
+const e2bSnapshotInfoSchema = z.object({
+  snapshotID: z.string(),
+  names: z.array(z.string()).default([]),
+});
+
+export type E2BSnapshotInfo = z.infer<typeof e2bSnapshotInfoSchema>;
 
 /** Default port envd listens on inside every sandbox. */
 const ENVD_PORT = 49983;
@@ -217,8 +235,18 @@ export class E2BRestClient {
     return this.requestJson("GET", `/sandboxes/${id}`, TIMEOUT_GET_MS, e2bSandboxDetailSchema);
   }
 
-  async pauseSandbox(id: string): Promise<void> {
-    await this.requestVoid("POST", `/sandboxes/${id}/pause`, TIMEOUT_PAUSE_MS);
+  /**
+   * Pause a sandbox. By default E2B persists filesystem + memory (a resumable
+   * freeze). Pass `{ memory: false }` for a filesystem-only pause: resuming it
+   * cold-boots (reboots) the sandbox from disk, dropping all process memory. The
+   * image-build path uses that to discard the build supervisor (and its secret
+   * env) before baking a reusable snapshot.
+   */
+  async pauseSandbox(id: string, opts?: { memory?: boolean }, signal?: AbortSignal): Promise<void> {
+    await this.requestVoid("POST", `/sandboxes/${id}/pause`, TIMEOUT_PAUSE_MS, {
+      ...(opts?.memory === undefined ? {} : { body: { memory: opts.memory } }),
+      signal,
+    });
   }
 
   /**
@@ -229,9 +257,10 @@ export class E2BRestClient {
    * through getSandbox when they need it, so this is a command: the success body
    * carries nothing we act on and is discarded.
    */
-  async connectSandbox(id: string, timeoutSeconds: number): Promise<void> {
+  async connectSandbox(id: string, timeoutSeconds: number, signal?: AbortSignal): Promise<void> {
     await this.requestVoid("POST", `/sandboxes/${id}/connect`, TIMEOUT_CONNECT_MS, {
       body: { timeout: timeoutSeconds },
+      signal,
     });
   }
 
@@ -243,6 +272,45 @@ export class E2BRestClient {
     await this.requestVoid("POST", `/sandboxes/${id}/timeout`, TIMEOUT_SETTTL_MS, {
       body: { timeout: timeoutSeconds },
     });
+  }
+
+  /**
+   * Bake the sandbox's current filesystem into a reusable snapshot template
+   * (`POST /sandboxes/{id}/snapshots`). The returned `snapshotID` is passed
+   * verbatim as `templateID` to {@link createSandbox} to spawn a prebuilt-image
+   * sandbox. Used by the image-build workflow after `.openinspect/setup.sh` has
+   * run once in the build sandbox.
+   */
+  async createSnapshot(
+    id: string,
+    options?: { name?: string; signal?: AbortSignal }
+  ): Promise<E2BSnapshotInfo> {
+    const startMs = Date.now();
+    try {
+      return await this.requestJson(
+        "POST",
+        `/sandboxes/${id}/snapshots`,
+        TIMEOUT_SNAPSHOT_MS,
+        e2bSnapshotInfoSchema,
+        { body: options?.name ? { name: options.name } : {}, signal: options?.signal }
+      );
+    } finally {
+      log.info("e2b.create_snapshot", { duration_ms: Date.now() - startMs, sandbox_id: id });
+    }
+  }
+
+  /**
+   * Delete a snapshot template (`DELETE /templates/{templateID}`). Snapshot ids,
+   * build tag included, are passed verbatim as the E2B API requires. Used by the
+   * image-build reaper to reclaim superseded prebuilt images.
+   */
+  async deleteTemplate(templateId: string, signal?: AbortSignal): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/templates/${encodeURIComponent(templateId)}`,
+      TIMEOUT_DELETE_TEMPLATE_MS,
+      { signal }
+    );
   }
 
   getHostnameForPort(sandboxId: string, port: number, domain?: string | null): string {
@@ -261,7 +329,7 @@ export class E2BRestClient {
    * `schema`, otherwise the call fails as an invalid response.
    */
   private requestJson<T>(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     timeoutMs: number,
     schema: z.ZodType<T>,
@@ -286,7 +354,7 @@ export class E2BRestClient {
    * can fail the call.
    */
   private requestVoid(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     timeoutMs: number,
     options?: { body?: unknown; signal?: AbortSignal }
@@ -300,7 +368,7 @@ export class E2BRestClient {
    * abort raised there is translated like any other (see the catch below).
    */
   private async send<T>(
-    method: "GET" | "POST" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     timeoutMs: number,
     options: { body?: unknown; signal?: AbortSignal } | undefined,

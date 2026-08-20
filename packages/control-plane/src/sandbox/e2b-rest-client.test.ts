@@ -210,4 +210,58 @@ describe("E2BRestClient", () => {
     const client = new E2BRestClient(defaultConfig);
     expect(client.getHostnameForPort("abc", 8080)).toBe("https://8080-abc.e2b.app");
   });
+
+  it("pauseSandbox sends no body by default but forwards memory:false for a disk-only pause", async () => {
+    const client = new E2BRestClient(defaultConfig);
+    fetchSpy.mockResolvedValue(new Response(null, { status: 204 }));
+    await client.pauseSandbox("sb-1");
+    expect(fetchSpy.mock.calls[0][1].body).toBeUndefined();
+
+    await client.pauseSandbox("sb-1", { memory: false });
+    expect(JSON.parse(fetchSpy.mock.calls[1][1].body)).toEqual({ memory: false });
+  });
+
+  it("createSnapshot posts to the snapshots endpoint and returns the snapshot id", async () => {
+    const client = new E2BRestClient(defaultConfig);
+    fetchSpy.mockResolvedValue(
+      jsonResponse({ snapshotID: "snap-abc:default", names: ["team/snap:default"] }, 201)
+    );
+    const snapshot = await client.createSnapshot("sb-1");
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://api.e2b.app/sandboxes/sb-1/snapshots");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({});
+    expect(snapshot.snapshotID).toBe("snap-abc:default");
+  });
+
+  it("createSnapshot forwards an optional name", async () => {
+    const client = new E2BRestClient(defaultConfig);
+    fetchSpy.mockResolvedValue(jsonResponse({ snapshotID: "snap-x:default", names: [] }, 201));
+    await client.createSnapshot("sb-1", { name: "my-snap" });
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toEqual({ name: "my-snap" });
+  });
+
+  it("createSnapshot aborts when the caller's deadline fires", async () => {
+    const client = new E2BRestClient(defaultConfig);
+    const caller = new AbortController();
+    fetchSpy.mockImplementation((_url: string, init: RequestInit) => {
+      caller.abort();
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      expect(init.signal?.aborted).toBe(true);
+      return Promise.reject(error);
+    });
+    await expect(client.createSnapshot("sb-1", { signal: caller.signal })).rejects.toThrow(
+      /timeout/
+    );
+  });
+
+  it("deleteTemplate passes the full snapshot id to E2B", async () => {
+    const client = new E2BRestClient(defaultConfig);
+    fetchSpy.mockResolvedValue(new Response(null, { status: 204 }));
+    await client.deleteTemplate("snap-abc:default");
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://api.e2b.app/templates/snap-abc%3Adefault");
+    expect(init.method).toBe("DELETE");
+  });
 });
