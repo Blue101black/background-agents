@@ -21,6 +21,7 @@ const automation = {
   triggerConfig: { conditions: [] },
   repositories: [{ repoOwner: "acme", repoName: "web", repoId: 1, baseBranch: "main" }],
   environmentIds: [],
+  providerSelections: {},
 };
 
 describe("listAutomationsResponseSchema", () => {
@@ -70,6 +71,29 @@ describe("listAutomationsResponseSchema", () => {
             },
           },
         ],
+        hasMore: false,
+        nextCursor: null,
+      }).success
+    ).toBe(false);
+  });
+});
+
+describe("automation provider selection contracts", () => {
+  it("returns selections in responses", () => {
+    expect(
+      listAutomationsResponseSchema.safeParse({
+        automations: [automation],
+        hasMore: false,
+        nextCursor: null,
+      }).success
+    ).toBe(true);
+  });
+
+  it("rejects unknown providers in response records", () => {
+    const providerSelections = { anthropic: { mode: "api_key" } };
+    expect(
+      listAutomationsResponseSchema.safeParse({
+        automations: [{ ...automation, providerSelections }],
         hasMore: false,
         nextCursor: null,
       }).success
