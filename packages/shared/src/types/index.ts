@@ -192,12 +192,17 @@ export {
   modelProviderAccountsResponseSchema,
   modelProviderAccountDefaultSchema,
   modelProviderAccountDefaultRequestSchema,
+  modelProviderAccountDisplayNameSchema,
   modelProviderAccountDefaultsResponseSchema,
   sessionModelProviderAuthSchema,
   sessionModelProviderAuthResponseSchema,
   legacyProviderKeyLocationSchema,
   legacyProviderCredentialsResponseSchema,
+  connectOpenAIModelProviderAccountRequestSchema,
+  connectXaiModelProviderAccountRequestSchema,
   connectModelProviderAccountRequestSchema,
+  reconnectOpenAIModelProviderAccountRequestSchema,
+  reconnectXaiModelProviderAccountRequestSchema,
   reconnectModelProviderAccountRequestSchema,
 } from "./provider-accounts";
 export type {
