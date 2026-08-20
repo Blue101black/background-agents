@@ -71,6 +71,7 @@ interface SandboxCircuitBreakerInfo {
   created_at: number;
   modal_object_id: string | null;
   snapshot_image_id: string | null;
+  snapshot_runtime_version: string | null;
   spawn_failure_count: number | null;
   last_spawn_failure: number | null;
 }
@@ -96,7 +97,11 @@ export interface SandboxStorage {
   getUserEnvVars(): Promise<Record<string, string> | undefined>;
   /** Update sandbox status */
   updateSandboxStatus(status: SandboxStatus): void;
-  /** Update sandbox for spawn (status, auth token, sandbox ID, created_at) */
+  /**
+   * Update sandbox for spawn (status, auth token, sandbox ID, created_at).
+   * Clears every field describing the previous sandbox instance, runtime
+   * version included.
+   */
   updateSandboxForSpawn(data: {
     status: SandboxStatus;
     createdAt: number;
@@ -108,8 +113,17 @@ export interface SandboxStorage {
   updateSandboxForResume(data: { status: SandboxStatus; createdAt: number }): void;
   /** Update sandbox Modal object ID (for snapshot API) */
   updateSandboxModalObjectId(modalObjectId: string | null): void;
-  /** Update sandbox snapshot image ID */
-  updateSandboxSnapshotImageId(sandboxId: string, imageId: string): void;
+  /** Set the runtime version describing the sandbox's current filesystem. */
+  updateSandboxRuntimeVersion(runtimeVersion: string | null): void;
+  /**
+   * Update sandbox snapshot image ID and the runtime version that produced it
+   * (null when the sandbox never reported one).
+   */
+  updateSandboxSnapshotImageId(
+    sandboxId: string,
+    imageId: string,
+    runtimeVersion: string | null
+  ): void;
   /** Update last activity timestamp */
   updateSandboxLastActivity(timestamp: number): void;
   /** Increment circuit breaker failure count */
@@ -361,6 +375,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       createdAt: sandboxState?.created_at || 0,
       providerObjectId: sandboxState?.modal_object_id || null,
       snapshotImageId: sandboxState?.snapshot_image_id || null,
+      snapshotRuntimeVersion: sandboxState?.snapshot_runtime_version || null,
       hasActiveWebSocket: this.wsManager.getSandboxWebSocket() !== null,
     };
 
@@ -390,8 +405,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       case "restore":
         this.log.info("Spawn decision: restore", {
           snapshot_image_id: spawnDecision.snapshotImageId,
+          snapshot_runtime_version: spawnDecision.snapshotRuntimeVersion,
         });
-        await this.restoreFromSnapshot(spawnDecision.snapshotImageId);
+        await this.restoreFromSnapshot(
+          spawnDecision.snapshotImageId,
+          spawnDecision.snapshotRuntimeVersion
+        );
         return;
 
       case "resume":
@@ -402,6 +421,13 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         return;
 
       case "spawn":
+        if (spawnDecision.reason) {
+          this.log.info("Spawn decision: spawn", {
+            event: "sandbox.snapshot_rejected",
+            reason: spawnDecision.reason,
+            snapshot_image_id: spawnState.snapshotImageId,
+          });
+        }
         await this.doSpawn();
         return;
     }
@@ -727,7 +753,10 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   /**
    * Restore a sandbox from a filesystem snapshot.
    */
-  private async restoreFromSnapshot(snapshotImageId: string): Promise<void> {
+  private async restoreFromSnapshot(
+    snapshotImageId: string,
+    snapshotRuntimeVersion: string
+  ): Promise<void> {
     if (!this.provider.restoreFromSnapshot) {
       this.log.info("Provider does not support restore, falling back to fresh spawn");
       // Fall back to fresh spawn
@@ -764,6 +793,12 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           preserveProviderObjectId: true,
         })
       );
+
+      // A restored sandbox runs the snapshot's binaries whatever the provider
+      // exports at launch, so the snapshot's version is the authoritative one.
+      // Seeding it here also makes the sandbox's own report a no-op, since the
+      // ready handler only fills a row with nothing recorded yet.
+      this.storage.updateSandboxRuntimeVersion(snapshotRuntimeVersion);
 
       await this.stopPriorProviderSandbox();
 
@@ -1012,10 +1047,18 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       });
 
       if (result.success && result.imageId) {
-        this.storage.updateSandboxSnapshotImageId(sandbox.id, result.imageId);
+        // Stamp the snapshot with the runtime that produced it: the image
+        // carries that runtime's binaries, so this is what a later restore is
+        // gated on, not whatever the session runs next.
+        this.storage.updateSandboxSnapshotImageId(
+          sandbox.id,
+          result.imageId,
+          sandbox.runtime_version
+        );
         this.log.info("Snapshot saved", {
           event: "sandbox.snapshot_saved",
           image_id: result.imageId,
+          runtime_version: sandbox.runtime_version,
           reason,
         });
         this.broadcaster.broadcast({
