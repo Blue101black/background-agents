@@ -291,6 +291,7 @@ export interface SandboxLifecycle {
   spawnSandbox(): Promise<void>;
   updateLastActivity(timestamp: number): void;
   terminateUnresponsiveSandbox(trigger: UnresponsiveSandboxTrigger): Promise<void>;
+  reportSandboxError(reason: string): void;
 }
 
 export type UnresponsiveSandboxTrigger =
@@ -362,10 +363,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         failure_count: circuitBreakerState.failureCount,
         wait_time_ms: cbDecision.waitTimeMs || 0,
       });
-      this.broadcaster.broadcast({
-        type: "sandbox_error",
-        error: `Sandbox spawning temporarily disabled after ${circuitBreakerState.failureCount} failures. Try again in ${Math.ceil((cbDecision.waitTimeMs || 0) / 1000)} seconds.`,
-      });
+      this.reportSandboxError(
+        `Sandbox spawning temporarily disabled after ${circuitBreakerState.failureCount} failures. Try again in ${Math.ceil((cbDecision.waitTimeMs || 0) / 1000)} seconds.`
+      );
       return;
     }
 
@@ -603,7 +603,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Failed to spawn sandbox";
-      this.storage.setLastSpawnError(errorMessage, Date.now());
       this.log.error("Sandbox spawn completed", {
         event: "sandbox.spawn",
         outcome: "error",
@@ -630,10 +629,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       }
 
       this.storage.updateSandboxStatus("failed");
-      this.broadcaster.broadcast({
-        type: "sandbox_error",
-        error: errorMessage,
-      });
+      this.reportSandboxError(errorMessage);
     } finally {
       this.isSpawningSandbox = false;
       this.providerStartupPending = false;
@@ -748,6 +744,37 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       });
       return undefined;
     }
+  }
+
+  /**
+   * Report why the sandbox failed: broadcast it to connected clients and
+   * persist it, as one step.
+   *
+   * `sandbox_error` is how the reason reaches a live UI; `last_spawn_error` is
+   * how it survives a reload, since that is what the session snapshot serves as
+   * `spawnError`. They are the same fact, so writing one without the other
+   * makes the reason visible only until someone refreshes — which is precisely
+   * when they are trying to read it.
+   *
+   * Sandbox status is deliberately not touched here. Most callers mark the
+   * sandbox failed themselves, but the circuit breaker reports a reason without
+   * changing state, and that distinction is theirs to make.
+   */
+  reportSandboxError(reason: string): void {
+    // Persisting is best effort. `updateSandboxSpawnError` is a bare synchronous
+    // sql.exec, so a storage failure would otherwise also cost the broadcast —
+    // the one signal an already-open tab gets — and, from the message queue's
+    // spawn catch, would replace the spawn error being reported with the
+    // storage error. Losing durability is bad; losing both is worse.
+    try {
+      this.storage.setLastSpawnError(reason, Date.now());
+    } catch (error) {
+      this.log.warn("Failed to persist sandbox failure reason", {
+        event: "sandbox.error_persist_failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    this.broadcaster.broadcast({ type: "sandbox_error", error: reason });
   }
 
   /**
@@ -880,19 +907,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           repo_owner: session.repo_owner,
           repo_name: session.repo_name,
         });
-        this.storage.setLastSpawnError(
-          result.error || "Failed to restore from snapshot",
-          Date.now()
-        );
         this.storage.updateSandboxStatus("failed");
-        this.broadcaster.broadcast({
-          type: "sandbox_error",
-          error: result.error || "Failed to restore from snapshot",
-        });
+        this.reportSandboxError(result.error || "Failed to restore from snapshot");
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Failed to restore sandbox";
-      this.storage.setLastSpawnError(errorMessage, Date.now());
       this.log.error("Sandbox restore completed", {
         event: "sandbox.restore",
         outcome: "error",
@@ -903,10 +922,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         repo_name: session?.repo_name,
       });
       this.storage.updateSandboxStatus("failed");
-      this.broadcaster.broadcast({
-        type: "sandbox_error",
-        error: errorMessage,
-      });
+      this.reportSandboxError(errorMessage);
     } finally {
       this.isSpawningSandbox = false;
       this.providerStartupPending = false;
@@ -986,12 +1002,8 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.storage.resetCircuitBreaker();
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Failed to resume sandbox";
-      this.storage.setLastSpawnError(errorMessage, Date.now());
       this.storage.updateSandboxStatus("failed");
-      this.broadcaster.broadcast({
-        type: "sandbox_error",
-        error: errorMessage,
-      });
+      this.reportSandboxError(errorMessage);
       this.log.error("Sandbox resume failed", {
         error: error instanceof Error ? error : String(error),
       });
@@ -1250,11 +1262,9 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         }
       }
       this.broadcaster.broadcast({ type: "sandbox_status", status: "failed" });
-      this.broadcaster.broadcast({
-        type: "sandbox_error",
-        error:
-          "Sandbox failed to connect within the allowed time. It will be retried on your next message.",
-      });
+      this.reportSandboxError(
+        "Sandbox failed to connect within the allowed time. It will be retried on your next message."
+      );
       return;
     }
 
