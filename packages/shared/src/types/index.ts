@@ -163,11 +163,14 @@ export {
   createAutomationRequestSchema,
   updateAutomationRequestSchema,
   listAutomationsResponseSchema,
+  automationInvocationStatusSchema,
 } from "./automations";
 export type {
   AutomationRepository,
   AutomationRepositoryInput,
   Automation,
+  AutomationExecutionSummary,
+  AutomationListItem,
   CreateAutomationRequest,
   UpdateAutomationRequest,
   AutomationRun,
