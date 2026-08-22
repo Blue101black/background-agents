@@ -6,6 +6,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import * as matchers from "@testing-library/jest-dom/matchers";
 import { DEFAULT_MODEL } from "@open-inspect/shared/models";
+import {
+  DEFAULT_KEYBOARD_SHORTCUTS,
+  type KeyboardShortcutPreferences,
+} from "@open-inspect/shared/types/keyboard-shortcuts";
 import Home from "./page";
 import { isSessionInboxKey } from "@/lib/session-inbox-api";
 import { isUnarchivedSessionListKey } from "@/lib/session-list";
@@ -76,6 +80,7 @@ const mocks = vi.hoisted(() => ({
     totalBytes: 10,
     ignoredProfileSkillIds: [],
   },
+  keyboardShortcuts: null as unknown as KeyboardShortcutPreferences,
 }));
 
 const repo = {
@@ -130,6 +135,19 @@ vi.mock("@/hooks/use-enabled-models", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-keyboard-shortcuts", () => ({
+  useKeyboardShortcuts: () => ({
+    shortcuts: mocks.keyboardShortcuts,
+    labels: {
+      "send-prompt":
+        mocks.keyboardShortcuts["send-prompt"].code === "KeyJ" ? "Alt+J" : "Cmd/Ctrl+Enter",
+      "open-command-menu": "Cmd/Ctrl+K",
+      "new-session": "Cmd/Ctrl+Shift+O",
+      "toggle-sidebar": "Cmd/Ctrl+/",
+    },
+  }),
+}));
+
 vi.mock("@/hooks/use-provider-accounts", () => ({
   useProviderAccounts: () => ({
     providers: [],
@@ -169,6 +187,7 @@ beforeEach(() => {
   ];
   mocks.providerAccountsValue = [];
   mocks.providerAccountsLoadingValue = false;
+  mocks.keyboardShortcuts = DEFAULT_KEYBOARD_SHORTCUTS;
   mocks.routerPush.mockReset();
   mocks.mutateMock.mockReset();
   vi.stubGlobal(
@@ -207,6 +226,23 @@ describe("Home", () => {
       "autocomplete",
       "off"
     );
+  });
+
+  it("submits with the configured prompt shortcut", async () => {
+    mocks.keyboardShortcuts = {
+      ...DEFAULT_KEYBOARD_SHORTCUTS,
+      "send-prompt": { code: "KeyJ", primary: false, alt: true, shift: false },
+    };
+    render(<Home />);
+    const input = screen.getByPlaceholderText("What do you want to build?");
+    fireEvent.change(input, { target: { value: "Ship it" } });
+    const promptCalls = () =>
+      vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/prompt")).length;
+
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", ctrlKey: true });
+    expect(promptCalls()).toBe(0);
+    fireEvent.keyDown(input, { key: "j", code: "KeyJ", altKey: true });
+    await waitFor(() => expect(promptCalls()).toBe(1));
   });
 
   it("completes skills from the current resolution preview", async () => {
