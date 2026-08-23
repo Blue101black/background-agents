@@ -29,9 +29,11 @@ type ModelReasoningSelectorProps = {
   reasoningEffort: ReasoningEffort | undefined;
   items: ModelCategory[];
   onModelChange: (model: ValidModel) => void;
-  onReasoningEffortChange: (effort: ReasoningEffort) => void;
+  onReasoningEffortChange: (effort: ReasoningEffort | undefined) => void;
   disabled?: boolean;
 };
+
+const DEFAULT_EFFORT_VALUE = "__default__";
 
 function formatEffort(effort: string): string {
   return effort === "xhigh" ? "XHigh" : `${effort.charAt(0).toUpperCase()}${effort.slice(1)}`;
@@ -49,6 +51,7 @@ export function ModelReasoningSelector({
   const [mobileView, setMobileView] = useState<"main" | "model" | "effort">("main");
   const reasoningConfig = getReasoningConfig(selectedModel);
   const selectedEffort = reasoningEffort ?? reasoningConfig?.default;
+  const effortLabel = selectedEffort ? formatEffort(selectedEffort) : "Default";
   const modelLabel = formatModelNameLower(selectedModel);
 
   return (
@@ -58,13 +61,11 @@ export function ModelReasoningSelector({
           type="button"
           disabled={disabled}
           className="flex max-w-full items-center gap-1.5 text-sm text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-          aria-label={`Model and effort: ${modelLabel}${selectedEffort ? `, ${selectedEffort}` : ""}`}
+          aria-label={`Model and effort: ${modelLabel}${reasoningConfig ? `, ${effortLabel}` : ""}`}
         >
           <span className="max-w-[9rem] truncate sm:max-w-none">{modelLabel}</span>
-          {selectedEffort && (
-            <span className="shrink-0 text-secondary-foreground">
-              {formatEffort(selectedEffort)}
-            </span>
+          {reasoningConfig && (
+            <span className="shrink-0 text-secondary-foreground">{effortLabel}</span>
           )}
           <ChevronDownIcon className="size-3.5 shrink-0 text-secondary-foreground" />
         </button>
@@ -96,7 +97,7 @@ export function ModelReasoningSelector({
                   {modelLabel}
                 </span>
               </DropdownMenuItem>
-              {reasoningConfig && selectedEffort && (
+              {reasoningConfig && (
                 <DropdownMenuItem
                   onSelect={(event) => {
                     event.preventDefault();
@@ -104,9 +105,7 @@ export function ModelReasoningSelector({
                   }}
                 >
                   <span>Effort</span>
-                  <span className="ml-auto text-muted-foreground">
-                    {formatEffort(selectedEffort)}
-                  </span>
+                  <span className="ml-auto text-muted-foreground">{effortLabel}</span>
                 </DropdownMenuItem>
               )}
             </>
@@ -125,11 +124,10 @@ export function ModelReasoningSelector({
               {mobileView === "model" ? (
                 <ModelOptions items={items} value={selectedModel} onChange={onModelChange} />
               ) : (
-                reasoningConfig &&
-                selectedEffort && (
+                reasoningConfig && (
                   <EffortOptions
                     efforts={reasoningConfig.efforts}
-                    value={selectedEffort}
+                    value={reasoningEffort}
                     onChange={onReasoningEffortChange}
                   />
                 )
@@ -153,18 +151,16 @@ export function ModelReasoningSelector({
                 <ModelOptions items={items} value={selectedModel} onChange={onModelChange} />
               </DropdownMenuSubContent>
             </DropdownMenuSub>
-            {reasoningConfig && selectedEffort && (
+            {reasoningConfig && (
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
                   <span>Effort</span>
-                  <span className="ml-auto text-muted-foreground">
-                    {formatEffort(selectedEffort)}
-                  </span>
+                  <span className="ml-auto text-muted-foreground">{effortLabel}</span>
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent align="end" collisionPadding={8} className="w-40">
                   <EffortOptions
                     efforts={reasoningConfig.efforts}
-                    value={selectedEffort}
+                    value={reasoningEffort}
                     onChange={onReasoningEffortChange}
                   />
                 </DropdownMenuSubContent>
@@ -224,17 +220,22 @@ function EffortOptions({
   onChange,
 }: {
   efforts: readonly ReasoningEffort[];
-  value: ReasoningEffort;
-  onChange: (effort: ReasoningEffort) => void;
+  value: ReasoningEffort | undefined;
+  onChange: (effort: ReasoningEffort | undefined) => void;
 }) {
   return (
     <DropdownMenuRadioGroup
-      value={value}
+      value={value ?? DEFAULT_EFFORT_VALUE}
       onValueChange={(nextValue) => {
+        if (nextValue === DEFAULT_EFFORT_VALUE) {
+          onChange(undefined);
+          return;
+        }
         const effort = efforts.find((candidate) => candidate === nextValue);
         if (effort) onChange(effort);
       }}
     >
+      <DropdownMenuRadioItem value={DEFAULT_EFFORT_VALUE}>Default</DropdownMenuRadioItem>
       {efforts.map((effort) => (
         <DropdownMenuRadioItem key={effort} value={effort}>
           {formatEffort(effort)}
