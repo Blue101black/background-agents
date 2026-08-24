@@ -268,19 +268,6 @@ export interface SlackAgentNotifyLookup {
   isEnabledForRepo(repoOwner: string | null, repoName: string | null): Promise<boolean>;
 }
 
-// ==================== Callbacks ====================
-
-/**
- * Optional callbacks from the lifecycle manager to the session DO.
- * Lightweight callback interface — the manager doesn't know what the callbacks do.
- */
-export interface LifecycleCallbacks {
-  /** Called when the sandbox is being terminated (heartbeat stale, inactivity timeout). */
-  onSandboxTerminating?: () => Promise<void>;
-  /** Called after the sandbox is terminal and cannot reconnect. */
-  onSandboxTerminated?: () => Promise<void>;
-}
-
 // ==================== Manager ====================
 
 /**
@@ -299,6 +286,8 @@ export type UnresponsiveSandboxTrigger =
   | "prompt_dispatch_send_failed"
   | "stop_send_failed"
   | "stop_confirmation_timeout";
+
+export type SandboxAlarmResult = "no_action" | "sandbox_failed" | "sandbox_terminated";
 
 /**
  * Manages sandbox lifecycle operations.
@@ -326,7 +315,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
     private readonly alarmScheduler: AlarmScheduler,
     private readonly idGenerator: IdGenerator,
     private readonly config: SandboxLifecycleConfig,
-    private readonly callbacks: LifecycleCallbacks = {},
     private readonly imageBuildLookup?: ImageBuildLookup
   ) {
     this.log = config.sessionId ? log.child({ session_id: config.sessionId }) : log;
@@ -1213,11 +1201,11 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
   /**
    * Handle alarm for inactivity and heartbeat monitoring.
    */
-  async handleAlarm(): Promise<void> {
+  async handleAlarm(): Promise<SandboxAlarmResult> {
     const sandbox = this.storage.getSandbox();
     if (!sandbox) {
       this.log.debug("Alarm fired: no sandbox found");
-      return;
+      return "no_action";
     }
 
     const now = Date.now();
@@ -1233,7 +1221,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.log.debug("Alarm: sandbox in terminal state, skipping", {
         sandbox_status: sandbox.status,
       });
-      return;
+      return "no_action";
     }
 
     // Check connecting timeout — sandbox failed to connect within allowed time
@@ -1250,7 +1238,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         elapsed_ms: connectingResult.elapsedMs,
         timeout_ms: this.config.connectingTimeout.timeoutMs,
       });
-      await this.callbacks.onSandboxTerminating?.();
       this.storage.updateSandboxStatus("failed");
       this.clearSandboxAccessState();
       if (this.canStopProviderSandbox()) {
@@ -1266,7 +1253,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       this.reportSandboxError(
         "Sandbox failed to connect within the allowed time. It will be retried on your next message."
       );
-      return;
+      return "sandbox_failed";
     }
 
     // Check heartbeat health
@@ -1282,8 +1269,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         last_heartbeat_ms: heartbeatHealth.ageMs || 0,
         threshold_ms: this.config.heartbeat.timeoutMs,
       });
-      // Fail any stuck processing message before terminating
-      await this.callbacks.onSandboxTerminating?.();
       this.storage.updateSandboxStatus("stale");
       this.clearSandboxAccessState();
       this.broadcaster.broadcast({ type: "sandbox_status", status: "stale" });
@@ -1318,8 +1303,7 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
       }
 
       this.wsManager.detachSandboxWebSocket(1000, "Heartbeat stale");
-      await this.callbacks.onSandboxTerminated?.();
-      return;
+      return "sandbox_terminated";
     }
 
     // Evaluate inactivity timeout
@@ -1343,8 +1327,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           last_activity: sandbox.last_activity,
           timeout_ms: this.config.inactivity.timeoutMs,
         });
-        // Fail any stuck processing message before terminating
-        await this.callbacks.onSandboxTerminating?.();
         // Set status to stopped FIRST to block reconnection attempts
         this.storage.updateSandboxStatus("stopped");
         this.clearSandboxAccessState();
@@ -1373,15 +1355,13 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         }
 
         this.wsManager.detachSandboxWebSocket(1000, "Inactivity timeout");
-        await this.callbacks.onSandboxTerminated?.();
-
         this.broadcaster.broadcast({
           type: "sandbox_warning",
           message: this.usesProviderManagedStop()
             ? "Sandbox stopped due to inactivity"
             : "Sandbox stopped due to inactivity, snapshot saved",
         });
-        return;
+        return "sandbox_terminated";
 
       case "extend":
         this.log.info("Inactivity extended", {
@@ -1396,19 +1376,18 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
           });
         }
         await this.alarmScheduler.schedule(now + inactivityDecision.extensionMs);
-        return;
+        return "no_action";
 
       case "schedule":
         this.log.debug("Scheduling next alarm", { next_check_ms: inactivityDecision.nextCheckMs });
         await this.alarmScheduler.schedule(now + inactivityDecision.nextCheckMs);
-        return;
+        return "no_action";
     }
   }
 
   async terminateUnresponsiveSandbox(trigger: UnresponsiveSandboxTrigger): Promise<void> {
     const sandbox = this.storage.getSandbox();
     if (!sandbox || isDeadSandboxStatus(sandbox.status)) {
-      await this.callbacks.onSandboxTerminated?.();
       return;
     }
 
@@ -1433,7 +1412,6 @@ export class SandboxLifecycleManager implements SandboxLifecycle {
         });
       }
     }
-    await this.callbacks.onSandboxTerminated?.();
   }
 
   /**

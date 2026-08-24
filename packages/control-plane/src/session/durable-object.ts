@@ -1056,10 +1056,6 @@ export class SessionDO extends DurableObject<Env> {
       this.alarmScheduler,
       idGenerator,
       config,
-      {
-        onSandboxTerminating: () => this.messageQueue.failStuckProcessingMessage(),
-        onSandboxTerminated: () => this.messageQueue.resumeAfterSandboxTermination(),
-      },
       imageBuildLookup
     );
   }
