@@ -4,7 +4,7 @@
  * Uses mocked dependencies to test lifecycle orchestration logic.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   SandboxLifecycleManager,
   DEFAULT_LIFECYCLE_CONFIG,
@@ -38,6 +38,29 @@ import {
 } from "../provider";
 import type { SandboxRow, SessionRow } from "../../session/types";
 import type { SandboxStatus } from "@open-inspect/shared/types/sessions";
+import { hashToken } from "../../auth/crypto";
+import type * as AuthCrypto from "../../auth/crypto";
+
+// Gate for the #1589 admission-race suite: hashToken passes through to the
+// real implementation, but a test can hold the next call open to keep the
+// spawn paused inside its one non-storage await.
+let hashTokenGate: Promise<void> = Promise.resolve();
+let releaseHashTokenGate: () => void = () => {};
+function blockNextHashToken(): void {
+  hashTokenGate = new Promise((resolve) => {
+    releaseHashTokenGate = resolve;
+  });
+}
+vi.mock("../../auth/crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof AuthCrypto>();
+  return {
+    ...actual,
+    hashToken: vi.fn(async (token: string) => {
+      await hashTokenGate;
+      return actual.hashToken(token);
+    }),
+  };
+});
 
 // ==================== Mock Factories ====================
 
@@ -145,12 +168,18 @@ function createMockStorage(
       if (sandbox) {
         sandbox.status = data.status;
         sandbox.created_at = data.createdAt;
-        sandbox.auth_token_hash = data.authTokenHash;
+        sandbox.auth_token_hash = "";
         sandbox.auth_token = null;
         sandbox.modal_sandbox_id = data.modalSandboxId;
         sandbox.runtime_version = null;
         if (!data.preserveProviderObjectId) sandbox.modal_object_id = null;
       }
+    }),
+    updateSandboxAuthTokenHash: vi.fn((modalSandboxId: string, authTokenHash: string) => {
+      calls.push("updateSandboxAuthTokenHash");
+      if (!sandbox || sandbox.modal_sandbox_id !== modalSandboxId) return false;
+      sandbox.auth_token_hash = authTokenHash;
+      return true;
     }),
     updateSandboxForResume: vi.fn((data) => {
       calls.push(`updateSandboxForResume:${data.status}`);
@@ -538,7 +567,7 @@ describe("SandboxLifecycleManager", () => {
         vi.mocked(storage.updateSandboxForSpawn).mockImplementation((data) => {
           calls.push("fence");
           sandbox.status = data.status;
-          sandbox.auth_token_hash = data.authTokenHash;
+          sandbox.auth_token_hash = "";
           sandbox.modal_sandbox_id = data.modalSandboxId;
         });
         vi.mocked(storage.updateSandboxModalObjectId).mockImplementation((id) => {
@@ -3726,5 +3755,118 @@ describe("SandboxLifecycleManager log context", () => {
     const line = errorLogs.find((entry) => entry.msg === "Cannot spawn sandbox: no session");
     expect(line).toBeDefined();
     expect(line).not.toHaveProperty("session_id");
+  });
+});
+
+describe("spawn admission race (#1589)", () => {
+  // `await hashToken` is a non-storage await, so the DO input gate admits
+  // other events while it runs. Whatever the sandbox row says at that moment
+  // is what a stale bridge's admission read sees — so the replacement
+  // identity, with credentials invalidated, must already be persisted.
+  function raceHarness(sandbox: ReturnType<typeof createMockSandbox>) {
+    const storage = createMockStorage(createMockSession(), sandbox);
+    const manager = new SandboxLifecycleManager(
+      createMockProvider(),
+      storage,
+      createMockBroadcaster(),
+      createMockWebSocketManager(false),
+      createMockAlarmScheduler(),
+      createMockIdGenerator(),
+      createTestConfig()
+    );
+    return { storage, manager };
+  }
+
+  afterEach(() => {
+    // Never leave the gate blocked: hashToken awaits the module-level gate on
+    // every call, so a failed mid-window assertion would otherwise hang every
+    // later test that spawns.
+    releaseHashTokenGate();
+    hashTokenGate = Promise.resolve();
+  });
+
+  it("fresh spawn: reserves the new identity before hashing opens the input gate", async () => {
+    const sandbox = createMockSandbox({
+      status: "failed",
+      modal_sandbox_id: "sb-old",
+      auth_token_hash: "old-hash",
+    });
+    const { storage, manager } = raceHarness(sandbox);
+
+    blockNextHashToken();
+    const hashCallsBefore = vi.mocked(hashToken).mock.calls.length;
+    const spawn = manager.spawnSandbox();
+    // Call history spans the whole file, so wait for the count to rise: THIS
+    // spawn has then provably reached the gated hash — with the phase-1
+    // reservation, which precedes it, already persisted.
+    await vi.waitFor(() =>
+      expect(vi.mocked(hashToken).mock.calls.length).toBeGreaterThan(hashCallsBefore)
+    );
+
+    // Mid-window view — what a stale bridge authenticating right now reads.
+    expect(sandbox.modal_sandbox_id).not.toBe("sb-old");
+    expect(sandbox.auth_token_hash).toBe("");
+    expect(sandbox.status).toBe("spawning");
+
+    releaseHashTokenGate();
+    await spawn;
+
+    // Phase 2 published the real hash after the identity reservation.
+    expect(sandbox.auth_token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(storage.calls.indexOf("updateSandboxForSpawn")).toBeLessThan(
+      storage.calls.indexOf("updateSandboxAuthTokenHash")
+    );
+  });
+
+  it("snapshot restore: reserves the new identity before hashing opens the input gate", async () => {
+    const sandbox = createMockSandbox({
+      status: "stopped",
+      modal_sandbox_id: "sb-old",
+      auth_token_hash: "old-hash",
+      snapshot_image_id: "img-abc123",
+      snapshot_runtime_version: COMPATIBLE_RUNTIME_VERSION,
+      created_at: Date.now() - 60000,
+    });
+    const { storage, manager } = raceHarness(sandbox);
+
+    blockNextHashToken();
+    const hashCallsBefore = vi.mocked(hashToken).mock.calls.length;
+    const spawn = manager.spawnSandbox();
+    // Call history spans the whole file, so wait for the count to rise: THIS
+    // spawn has then provably reached the gated hash — with the phase-1
+    // reservation, which precedes it, already persisted.
+    await vi.waitFor(() =>
+      expect(vi.mocked(hashToken).mock.calls.length).toBeGreaterThan(hashCallsBefore)
+    );
+
+    expect(sandbox.modal_sandbox_id).not.toBe("sb-old");
+    expect(sandbox.auth_token_hash).toBe("");
+    expect(sandbox.status).toBe("spawning");
+
+    releaseHashTokenGate();
+    await spawn;
+
+    expect(sandbox.auth_token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(storage.calls.indexOf("updateSandboxForSpawn")).toBeLessThan(
+      storage.calls.indexOf("updateSandboxAuthTokenHash")
+    );
+  });
+
+  it("abandons the attempt without failure writes when the reservation is superseded", async () => {
+    const sandbox = createMockSandbox({ status: "failed" });
+    const { storage, manager } = raceHarness(sandbox);
+    vi.mocked(storage.updateSandboxAuthTokenHash).mockReturnValue(false);
+
+    await manager.spawnSandbox();
+
+    // The row and circuit breaker describe the newer reservation now — the
+    // superseded attempt must not mark them failed on its way out.
+    expect(sandbox.status).toBe("spawning");
+    expect(storage.calls).not.toContain("updateSandboxStatus:failed");
+    expect(storage.incrementCircuitBreakerFailure).not.toHaveBeenCalled();
+    expect(storage.setLastSpawnError).not.toHaveBeenCalledWith(
+      expect.stringContaining("superseded"),
+      expect.anything()
+    );
   });
 });
