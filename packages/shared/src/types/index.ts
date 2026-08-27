@@ -174,6 +174,7 @@ export {
   toRepositoryRef,
   automationRepositoryInputSchema,
   automationRepositoriesInputSchema,
+  sentryClientSecretSchema,
   createAutomationRequestSchema,
   updateAutomationRequestSchema,
   listAutomationsResponseSchema,
