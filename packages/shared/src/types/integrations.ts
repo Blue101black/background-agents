@@ -65,14 +65,36 @@ export type GitHubBotSettings = z.infer<typeof githubBotSettingsSchema>;
  *
  * Provider-agnostic: applies to both GitHub and GitLab.
  */
-export const scmSettingsSchema = z.strictObject({
-  /** Always open pull/merge requests created by sessions as drafts. */
-  alwaysUseDraftMode: z.boolean().optional(),
-  /** Label applied to pull/merge requests created by sessions. */
-  pullRequestLabel: z.string().optional(),
-});
+export const scmSettingsSchema = z
+  .object({
+    /** Always open pull/merge requests created by sessions as drafts. */
+    alwaysUseDraftMode: z.boolean({ error: "alwaysUseDraftMode must be a boolean" }).optional(),
+    /** Label applied to pull/merge requests created by sessions. */
+    pullRequestLabel: z
+      .string({ error: "pullRequestLabel must be a string" })
+      .trim()
+      .refine((label) => !label.includes(","), {
+        message: "pullRequestLabel must not contain commas",
+      })
+      .optional(),
+  })
+  .strict()
+  .transform(({ alwaysUseDraftMode, pullRequestLabel }) => ({
+    ...(alwaysUseDraftMode !== undefined ? { alwaysUseDraftMode } : {}),
+    ...(pullRequestLabel ? { pullRequestLabel } : {}),
+  }));
 
 export type ScmSettings = z.infer<typeof scmSettingsSchema>;
+
+/** SCM has no per-repository enable/disable allowlist. */
+export type ScmGlobalConfig = {
+  enabledRepos?: never;
+  defaults?: ScmSettings;
+};
+
+export const scmGlobalConfigSchema: z.ZodType<ScmGlobalConfig> = z.strictObject({
+  defaults: scmSettingsSchema.optional(),
+});
 
 /** Repository SCM settings are field-level overrides; omitted fields inherit globally. */
 export type ScmRepoSettings = ScmSettings;
@@ -429,10 +451,7 @@ export const integrationSettingsSchemas = {
     repo: slackRepoSettingsSchema,
   },
   scm: {
-    global: z.strictObject({
-      enabledRepos: z.never().optional(),
-      defaults: scmSettingsSchema.optional(),
-    }),
+    global: scmGlobalConfigSchema,
     repo: scmSettingsSchema,
   },
 } as const;
@@ -477,7 +496,6 @@ export type LinearGlobalConfig = IntegrationSettingsMap["linear"]["global"];
 export type CodeServerGlobalConfig = IntegrationSettingsMap["code-server"]["global"];
 export type VncGlobalConfig = IntegrationSettingsMap["vnc"]["global"];
 export type SandboxGlobalConfig = IntegrationSettingsMap["sandbox"]["global"];
-export type ScmGlobalConfig = IntegrationSettingsMap["scm"]["global"];
 export type SlackGlobalConfig = IntegrationSettingsMap["slack"]["global"];
 
 /** Full MCP server config with decrypted credentials. Internal use only. */
