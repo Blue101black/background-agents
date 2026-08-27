@@ -203,7 +203,7 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/sessions") {
-        return Response.json({ sessionId: "session-1" });
+        return Response.json({ sessionId: "session-1", status: "created" });
       }
       if (url === "/api/sessions/session-1/prompt") {
         return Response.json({ ok: true });
@@ -289,7 +289,7 @@ describe("Home", () => {
       warmingStatus.compareDocumentPosition(attachmentButton) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
 
-    resolveCreate?.(Response.json({ sessionId: "session-1" }));
+    resolveCreate?.(Response.json({ sessionId: "session-1", status: "created" }));
     await waitFor(() => expect(screen.queryByText("Warming sandbox...")).not.toBeInTheDocument());
   });
 
