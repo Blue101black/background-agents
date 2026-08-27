@@ -293,6 +293,24 @@ describe("Home", () => {
     await waitFor(() => expect(screen.queryByText("Warming sandbox...")).not.toBeInTheDocument());
   });
 
+  it("does not warm a pending session from a malformed create response", async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      if (String(input) === "/api/sessions") {
+        return Response.json({ sessionId: "session-1" });
+      }
+      return Response.json({ error: "unexpected request" }, { status: 500 });
+    });
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Investigate logs");
+    await waitFor(() => expect(screen.queryByText("Warming sandbox...")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await screen.findByText("Failed to create session");
+    expect(mocks.routerPush).not.toHaveBeenCalled();
+  });
+
   it("invalidates a warmed session when the managed skill selection changes", async () => {
     const user = userEvent.setup();
     render(<Home />);
