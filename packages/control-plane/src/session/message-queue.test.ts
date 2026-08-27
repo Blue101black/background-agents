@@ -316,6 +316,7 @@ describe("SessionMessageQueue", () => {
     });
     expect(h.repository.createEvent).not.toHaveBeenCalled();
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+    expect(h.broadcast).toHaveBeenCalledWith({ type: "prompt_queue_updated", promptQueue: [] });
   });
 
   it("re-drives duplicate pending Autofix work without admitting another message", async () => {
@@ -341,6 +342,9 @@ describe("SessionMessageQueue", () => {
 
     expect(result).toEqual({ kind: "duplicate", messageId: "msg-existing" });
     expect(h.sessionStatus.transition).toHaveBeenCalledWith("active");
+    expect(h.broadcast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "sandbox_event" })
+    );
   });
 
   it("passes closed-session state into atomic Autofix admission", async () => {
@@ -825,6 +829,9 @@ describe("SessionMessageQueue", () => {
 
   it("preserves Autofix origin on the canonical dispatch-time user event", async () => {
     const h = buildQueue();
+    h.repository.getParticipantById.mockReturnValue(
+      createParticipant({ scm_user_id: "255062780", scm_login: "open-inspect[bot]" })
+    );
     const origin = {
       kind: "review",
       authorType: "human",
@@ -838,7 +845,14 @@ describe("SessionMessageQueue", () => {
     await h.queue.processMessageQueue();
 
     const event = h.repository.startMessageProcessing.mock.calls[0][2];
-    expect(event).toEqual(expect.objectContaining({ origin }));
+    expect(event).toEqual(
+      expect.objectContaining({
+        origin,
+        author: expect.objectContaining({
+          avatar: "https://avatars.githubusercontent.com/u/255062780?v=4",
+        }),
+      })
+    );
     expect(serverMessageSchema.parse({ type: "sandbox_event", event })).toEqual({
       type: "sandbox_event",
       event: expect.objectContaining({ origin }),
