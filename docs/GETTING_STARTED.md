@@ -366,10 +366,22 @@ Skip this step if you don't need Slack integration.
 2. Click **"Create New App"** → **"From scratch"**
 3. Name it (e.g., `Open-Inspect`) and select your workspace
 
+After deploying the Slack worker, you can configure the app from
+[`packages/slack-bot/slack-app-manifest.yaml`](../packages/slack-bot/slack-app-manifest.yaml)
+instead of entering the settings below individually. Replace `SLACK_EVENTS_URL` with the worker's
+`/events` URL and `SLACK_INTERACTIONS_URL` with its `/interactions` URL before applying the
+manifest. The template includes `message.channels` and `message.groups` for channel-message
+automations; remove those subscriptions if the deployment will not use that feature.
+
+Before `terraform apply`, configure the OAuth scopes below, install the app, and collect its bot
+token and signing secret. Apply the URL-dependent manifest after deployment, when Slack can verify
+the worker's `/events` and `/interactions` endpoints.
+
 ### Configure OAuth & Permissions
 
 1. Go to **OAuth & Permissions** in the sidebar
 2. Add **Bot Token Scopes**:
+   - `assistant:write`
    - `app_mentions:read`
    - `chat:write`
    - `channels:history`
@@ -377,10 +389,11 @@ Skip this step if you don't need Slack integration.
    - `groups:history`
    - `groups:read`
    - `im:history`
-   - `im:read`
    - `files:read` (lets the bot read images attached to messages and forward them to sessions)
    - `files:write`
    - `reactions:write`
+   - `users:read`
+   - `users:read.email`
 3. Click **"Install to Workspace"**
 4. Note the **Bot Token** (`xoxb-...`)
 
@@ -394,9 +407,10 @@ Queued delivery applies to every Slack completion, including text-only replies. 
 
 1. Add **Account | Queues | Edit** to the Cloudflare API token used by Terraform. Terraform needs
    this permission to create the completion queue, dead-letter queue, Worker binding, and consumer.
-2. Add the Slack bot scopes `files:write` and `files:read` (needed to forward images attached to
-   Slack messages into sessions), reinstall the app once for the workspace, and update
-   `slack_bot_token` if Slack issued a replacement.
+2. Ensure the Slack app has `assistant:write`, `users:read`, `users:read.email`, `files:read`, and
+   `files:write`. Reinstall the app once for the workspace, and update `slack_bot_token` if Slack
+   issued a replacement. These scopes enable Agent view, user identity resolution, inbound images,
+   and generated-media delivery.
 3. Run `terraform apply`, then verify a text completion, an inbound image attached to a prompt, and
    a generated-media attachment. If the token lacks Queue access, the apply fails while provisioning
    the new resources; grant the permission and rerun the apply.
@@ -714,20 +728,28 @@ Terraform will update the workers with the required bindings.
 
 ## Step 7b: Complete Slack Setup (If Using Slack)
 
-Now that the Slack bot worker is deployed, configure the App Home and Event Subscriptions.
+Now that the Slack bot worker is deployed, configure the agent experience, App Home, and event
+subscriptions.
+
+### Enable Agents
+
+1. Go to [Slack Apps](https://api.slack.com/apps) -> Your Slack App → **Agents**
+2. Enable the agent feature and use `AI coding assistant for your codebase` as the agent description
 
 ### Enable App Home
 
-The App Home provides a settings interface where users can configure their preferred model.
+The App Home provides settings for users' preferred model, reasoning effort, and branch. The
+writable Messages tab lets users start direct-message sessions.
 
 1. Go to [Slack Apps](https://api.slack.com/apps) -> Your Slack App → **App Home**
 2. Under **Show Tabs**, toggle **"Home Tab"** to On
+3. Toggle **"Messages Tab"** to On and allow users to send messages
 
 ### Configure Event Subscriptions
 
 1. Go to [Slack Apps](https://api.slack.com/apps) -> Your Slack App → **Event Subscriptions**
 2. Toggle **"Enable Events"** to On
-3. Enter **Request URL**:
+3. Enter the **Request URL** shown by `terraform output -raw slack_bot_events_url`:
    ```
    https://open-inspect-slack-bot-{deployment_name}.YOUR-SUBDOMAIN.workers.dev/events
    ```
@@ -738,6 +760,7 @@ The App Home provides a settings interface where users can configure their prefe
    - `app_home_opened` (required for App Home settings)
    - `app_mention`
    - `message.channels` (optional - if you want the bot to see all channel messages)
+   - `message.groups` (optional - if you want automations in private channels)
    - `message.im` (enables direct message support)
 6. Click **Save Changes**
 
@@ -745,7 +768,7 @@ The App Home provides a settings interface where users can configure their prefe
 
 1. Go to **Interactivity & Shortcuts**
 2. Toggle **"Interactivity"** to On
-3. Enter **Request URL**:
+3. Enter the **Request URL** shown by `terraform output -raw slack_bot_interactions_url`:
    ```
    https://open-inspect-slack-bot-{deployment_name}.YOUR-SUBDOMAIN.workers.dev/interactions
    ```
