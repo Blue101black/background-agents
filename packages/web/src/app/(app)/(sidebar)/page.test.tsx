@@ -16,6 +16,9 @@ import { isUnarchivedSessionListKey } from "@/lib/session-list";
 
 expect.extend(matchers);
 
+const openAiModel = "openai/gpt-5.4";
+const unrelatedModel = "opencode/kimi-k2.5";
+
 const mocks = vi.hoisted(() => ({
   routerPush: vi.fn(),
   mutateMock: vi.fn(),
@@ -51,7 +54,7 @@ const mocks = vi.hoisted(() => ({
   }>,
   providerAccountsValue: [] as Array<{
     id: string;
-    provider: "openai" | "xai";
+    provider: "anthropic" | "openai" | "xai";
     displayName: string;
     externalAccountId: string | null;
     status: "active";
@@ -642,6 +645,118 @@ describe("Home", () => {
 
     await waitFor(() => expect(sessionCreateBody()).toMatchObject({ providerSelections: {} }));
     expect(localStorage.getItem("open-inspect-last-provider-selections:v1")).toBe("{}");
+  });
+
+  it("retains stored provider authentication and allows unrelated models when loading fails", async () => {
+    const accountId = "c".repeat(32);
+    const storedSelections = JSON.stringify({
+      openai: { mode: "provider_account", accountId },
+    });
+    localStorage.setItem("open-inspect-last-provider-selections", storedSelections);
+    mocks.enabledModelsValue = [unrelatedModel];
+    mocks.enabledModelOptionsValue = [
+      {
+        category: "OpenCode Zen",
+        models: [{ id: unrelatedModel, name: "Kimi K2.5", description: "" }],
+      },
+    ];
+    localStorage.setItem("open-inspect-last-selected-model", unrelatedModel);
+    mocks.providerAccountsError = new Error("Provider accounts are unavailable");
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Continue work");
+    expect(screen.getByRole("alert")).toHaveTextContent("Provider accounts are unavailable");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(sessionCreateBody().providerSelections).toEqual({}));
+    expect(localStorage.getItem("open-inspect-last-provider-selections:v1")).toBe(storedSelections);
+    expect(localStorage.getItem("open-inspect-last-provider-selections")).toBeNull();
+  });
+
+  it("blocks subscription models until provider authentication can be resolved", async () => {
+    const accountId = "c".repeat(32);
+    const storedSelections = JSON.stringify({
+      openai: { mode: "provider_account", accountId },
+    });
+    mocks.enabledModelsValue = [DEFAULT_MODEL, openAiModel];
+    mocks.enabledModelOptionsValue = [
+      { category: "OpenAI", models: [{ id: openAiModel, name: "GPT-5.4", description: "" }] },
+    ];
+    localStorage.setItem("open-inspect-last-selected-model", openAiModel);
+    localStorage.setItem("open-inspect-last-provider-selections", storedSelections);
+    mocks.providerAccountsError = new Error("Provider accounts are unavailable");
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Continue work");
+
+    expect(screen.getByRole("button", { name: /send/i })).toBeDisabled();
+    expect(localStorage.getItem("open-inspect-last-provider-selections:v1")).toBe(storedSelections);
+    expect(localStorage.getItem("open-inspect-last-provider-selections")).toBeNull();
+  });
+
+  it("allows explicit API-key authentication when provider accounts fail to load", async () => {
+    mocks.enabledModelsValue = [openAiModel];
+    mocks.enabledModelOptionsValue = [
+      { category: "OpenAI", models: [{ id: openAiModel, name: "GPT-5.4", description: "" }] },
+    ];
+    localStorage.setItem("open-inspect-last-selected-model", openAiModel);
+    localStorage.setItem(
+      "open-inspect-last-provider-selections",
+      JSON.stringify({ openai: { mode: "api_key" } })
+    );
+    mocks.providerAccountsError = new Error("Provider accounts are unavailable");
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Continue work");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(mocks.routerPush).toHaveBeenCalledWith("/session/session-1"));
+    expect(sessionCreateBody()).toMatchObject({
+      providerSelections: { openai: { mode: "api_key" } },
+    });
+  });
+
+  it("uses a cached explicit account when provider account revalidation fails", async () => {
+    const accountId = "d".repeat(32);
+    mocks.enabledModelsValue = [openAiModel];
+    mocks.enabledModelOptionsValue = [
+      { category: "OpenAI", models: [{ id: openAiModel, name: "GPT-5.4", description: "" }] },
+    ];
+    mocks.providerAccountsValue = [
+      {
+        id: accountId,
+        provider: "openai",
+        displayName: "Cached ChatGPT",
+        externalAccountId: null,
+        status: "active",
+        createdBy: null,
+        updatedBy: null,
+        lastVerifiedAt: null,
+        lastUsedAt: null,
+        createdAt: 1,
+        updatedAt: 1,
+        archivedAt: null,
+      },
+    ];
+    localStorage.setItem("open-inspect-last-selected-model", openAiModel);
+    localStorage.setItem(
+      "open-inspect-last-provider-selections",
+      JSON.stringify({ openai: { mode: "provider_account", accountId } })
+    );
+    mocks.providerAccountsError = new Error("Provider account revalidation failed");
+    const user = userEvent.setup();
+    render(<Home />);
+
+    await user.type(screen.getByPlaceholderText("What do you want to build?"), "Continue work");
+    await user.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(mocks.routerPush).toHaveBeenCalledWith("/session/session-1"));
+    expect(sessionCreateBody()).toMatchObject({
+      providerSelections: { openai: { mode: "provider_account", accountId } },
+    });
   });
 
   it("waits for environments to load before restoring a stored environment", async () => {
