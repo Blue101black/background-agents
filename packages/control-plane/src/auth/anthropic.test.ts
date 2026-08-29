@@ -49,6 +49,25 @@ describe("Anthropic OAuth tokens", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("accepts account metadata returned with successful tokens", async () => {
+    const tokens = {
+      access_token: "access",
+      refresh_token: "refresh",
+      expires_in: 28_800,
+      account: { uuid: "account-id", email_address: "user@example.com" },
+      organization: { uuid: "organization-id" },
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue(Response.json(tokens));
+
+    await expect(
+      exchangeAnthropicAuthorizationCode({
+        authorizationCode: "code",
+        codeVerifier: "v".repeat(43),
+        state: "state",
+      })
+    ).resolves.toEqual(tokens);
+  });
+
   it("refreshes with JSON and accepts omitted refresh-token rotation", async () => {
     globalThis.fetch = vi
       .fn()

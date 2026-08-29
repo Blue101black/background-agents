@@ -20,6 +20,8 @@ describe("AnthropicModelProviderAccountAdapter", () => {
         refresh_token: "refresh",
         refresh_token_expires_in: 3600,
         scope: "user:inference user:profile",
+        account: { uuid: "account-id" },
+        organization: { uuid: "organization-id" },
       })
     );
 

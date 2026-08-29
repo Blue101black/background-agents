@@ -14,6 +14,8 @@ const tokenFields = {
   refresh_token_expires_in: z.number().int().positive().max(MAX_TOKEN_LIFETIME_SECONDS).optional(),
   scope: z.string().trim().min(1).max(4096).optional(),
   token_type: z.string().trim().min(1).max(32).optional(),
+  account: z.unknown().optional(),
+  organization: z.unknown().optional(),
 } as const;
 
 export const anthropicInitialTokenResponseSchema = z.strictObject({
