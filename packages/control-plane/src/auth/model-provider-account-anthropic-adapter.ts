@@ -86,10 +86,16 @@ function validateAbsoluteExpiry(value: number, now: number, label: string): numb
 
 function mapTokenError(error: unknown, operation: string): ProviderRefreshError {
   const unauthorized = error instanceof AnthropicTokenError && error.reason === "unauthorized";
+  const diagnostics =
+    error instanceof AnthropicTokenError
+      ? ` (status ${error.status}, reason ${error.reason})`
+      : error instanceof Error
+        ? ` (cause ${error.name})`
+        : "";
   return new ProviderRefreshError(
     unauthorized
-      ? `Anthropic ${operation} was unauthorized`
-      : `Anthropic ${operation} outcome was ambiguous`,
+      ? `Anthropic ${operation} was unauthorized${diagnostics}`
+      : `Anthropic ${operation} outcome was ambiguous${diagnostics}`,
     unauthorized ? "unauthorized" : "ambiguous",
     { cause: error }
   );

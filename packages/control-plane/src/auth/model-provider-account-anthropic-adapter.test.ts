@@ -152,6 +152,26 @@ describe("AnthropicModelProviderAccountAdapter", () => {
     });
   });
 
+  it("retains safe upstream diagnostics when authorization-code exchange fails", async () => {
+    const adapter = new AnthropicModelProviderAccountAdapter(
+      vi.fn().mockRejectedValue(new AnthropicTokenError("discarded body", 400, "unauthorized"))
+    );
+
+    await expect(adapter.connect(CONNECT_INPUT)).rejects.toMatchObject({
+      message:
+        "Anthropic authorization code exchange was unauthorized (status 400, reason unauthorized)",
+      classification: "unauthorized",
+    });
+
+    const timeout = new AnthropicModelProviderAccountAdapter(
+      vi.fn().mockRejectedValue(new DOMException("discarded detail", "TimeoutError"))
+    );
+    await expect(timeout.connect(CONNECT_INPUT)).rejects.toMatchObject({
+      message: "Anthropic authorization code exchange outcome was ambiguous (cause TimeoutError)",
+      classification: "ambiguous",
+    });
+  });
+
   it("allows only accounts with no trusted external identity", () => {
     const adapter = new AnthropicModelProviderAccountAdapter();
 
