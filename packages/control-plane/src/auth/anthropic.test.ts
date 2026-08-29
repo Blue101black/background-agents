@@ -49,15 +49,19 @@ describe("Anthropic OAuth tokens", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("accepts account metadata returned with successful tokens", async () => {
+  it("strips unknown metadata from successful token responses", async () => {
     const tokens = {
       access_token: "access",
       refresh_token: "refresh",
       expires_in: 28_800,
+    };
+    const response = {
+      ...tokens,
       account: { uuid: "account-id", email_address: "user@example.com" },
       organization: { uuid: "organization-id" },
+      unexpected: true,
     };
-    globalThis.fetch = vi.fn().mockResolvedValue(Response.json(tokens));
+    globalThis.fetch = vi.fn().mockResolvedValue(Response.json(response));
 
     await expect(
       exchangeAnthropicAuthorizationCode({
@@ -89,8 +93,7 @@ describe("Anthropic OAuth tokens", () => {
     { access_token: "", refresh_token: "refresh" },
     { access_token: "access" },
     { access_token: "access", refresh_token: "refresh", expires_in: 0 },
-    { access_token: "access", refresh_token: "refresh", unexpected: true },
-  ])("rejects invalid or non-strict initial responses: %o", async (body) => {
+  ])("rejects invalid initial responses: %o", async (body) => {
     globalThis.fetch = vi.fn().mockResolvedValue(Response.json(body));
 
     await expect(
