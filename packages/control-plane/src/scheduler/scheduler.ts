@@ -247,6 +247,14 @@ export async function resolveAutomationProviderAuth(
   );
 }
 
+/**
+ * Put stable automation instructions first so provider prompt caches can reuse
+ * them when the event-specific context changes.
+ */
+export function composeAutomationPrompt(contextBlock: string, instructions: string): string {
+  return `${instructions}\n---\n\n${contextBlock}`;
+}
+
 export class Scheduler {
   private readonly log: Logger;
 
@@ -854,6 +862,7 @@ export class Scheduler {
 
   // ─── Event handler ───────────────────────────────────────────────────────
 
+  /** Match an inbound event to automations and start or steer their invocations. */
   async event(event: AutomationEvent): Promise<SchedulerEventResult> {
     const store = new AutomationStore(this.db);
 
@@ -957,10 +966,11 @@ export class Scheduler {
       // window before a run has created its session (no steerable row yet), so
       // a reply racing the initial trigger gets the "already active" notice
       // instead of a second session.
-      const instructionsOverride = appendSlackSessionInstructions(
-        `${event.contextBlock}\n---\n\n${automation.instructions}`,
+      const instructions = appendSlackSessionInstructions(
+        automation.instructions,
         slackSessionInstructions
       );
+      const instructionsOverride = composeAutomationPrompt(event.contextBlock, instructions);
       const result = await this.startInvocation(store, {
         automation,
         source: "event",
@@ -971,10 +981,7 @@ export class Scheduler {
         ...(event.source === "slack"
           ? {
               instructionsOverrideFactory: async () =>
-                appendSlackSessionInstructions(
-                  `${await slackContextBlock(event)}\n---\n\n${automation.instructions}`,
-                  slackSessionInstructions
-                ),
+                composeAutomationPrompt(await slackContextBlock(event), instructions),
             }
           : {}),
       });
