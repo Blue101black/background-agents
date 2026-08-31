@@ -1,5 +1,10 @@
 import { isSessionPromptable } from "@open-inspect/shared/types/session-activity";
 import type { ServerMessage } from "@open-inspect/shared/types/server-messages";
+import {
+  WS_AUTHORIZATION_REVOKED_REASON,
+  WS_CLOSE_AUTHORIZATION_REVOKED,
+  WS_CLOSE_INTERNAL_ERROR,
+} from "@open-inspect/shared/types/websocket";
 import { hashToken } from "../auth/crypto";
 import type { Logger } from "../logger";
 import { isSandboxReconnectBlockedStatus } from "../sandbox/lifecycle/decisions";
@@ -17,6 +22,7 @@ import type { SandboxRepository } from "./sandbox-repository";
 import type { SessionCoreRepository } from "./session-core-repository";
 import type { SessionSnapshotReader } from "./snapshot-reader";
 import type { SessionWebSocketManager } from "./websocket-manager";
+import { WS_AUTHORIZATION_LEASE_MS } from "./authorization-lease";
 
 /**
  * Maximum age of a WebSocket authentication token (in milliseconds).
@@ -25,6 +31,7 @@ import type { SessionWebSocketManager } from "./websocket-manager";
  */
 const WS_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+/** Dependencies for authenticating sockets and validating browser authorization. */
 export interface SessionConnectionAuthenticatorDeps {
   wsManager: SessionWebSocketManager;
   sessionCoreRepository: SessionCoreRepository;
@@ -38,6 +45,8 @@ export interface SessionConnectionAuthenticatorDeps {
   snapshotReader: SessionSnapshotReader;
   schedulePullRequestRefresh: (trigger: "open" | "manual") => void;
   scmProviderName: SourceControlProviderName;
+  /** Revalidate a user's session-collaboration permission before granting a lease. */
+  verifyAuthorization: (userId: string) => Promise<"valid" | "rejected" | "unavailable">;
   /** The session-scoped logger; upgrade/subscribe paths also receive request-scoped children. */
   log: Logger;
 }
@@ -45,8 +54,8 @@ export interface SessionConnectionAuthenticatorDeps {
 /**
  * Admits connections to the session: sandbox WebSocket upgrades (token +
  * lifecycle-state guards, re-checked after the non-storage token-hash await),
- * client subscriptions (token TTL, snapshot handoff), and post-hibernation
- * client identity recovery.
+ * client subscriptions (token TTL, permission checks, authorization leases,
+ * snapshot handoff), and post-hibernation client identity recovery.
  */
 export class SessionConnectionAuthenticator {
   constructor(private readonly deps: SessionConnectionAuthenticatorDeps) {}
@@ -210,9 +219,7 @@ export class SessionConnectionAuthenticator {
     }
   }
 
-  /**
-   * Handle client subscription with token validation.
-   */
+  /** Validate the client token and current permission before granting an authorization lease. */
   async handleSubscribe(
     ws: WebSocket,
     data: {
@@ -255,6 +262,34 @@ export class SessionConnectionAuthenticator {
         return;
       }
 
+      if (!participant.canonical_user_id) {
+        wsManager.close(ws, WS_CLOSE_AUTHORIZATION_REVOKED, WS_AUTHORIZATION_REVOKED_REASON);
+        return;
+      }
+
+      // Authorization is intentionally sampled once at the start of this
+      // subscription request. A concurrent role change takes effect when this
+      // bounded lease expires, not midway through an in-flight request.
+      const authorization = await this.deps.verifyAuthorization(participant.canonical_user_id);
+      if (authorization !== "valid") {
+        log.warn("ws.connect", {
+          event: "ws.connect",
+          ws_type: "client",
+          outcome: "auth_failed",
+          reject_reason:
+            authorization === "unavailable" ? "authorization_unavailable" : "authorization_denied",
+          participant_id: participant.id,
+          user_id: participant.canonical_user_id,
+        });
+        if (authorization === "unavailable") {
+          wsManager.close(ws, WS_CLOSE_INTERNAL_ERROR, "Authorization temporarily unavailable");
+        } else {
+          wsManager.close(ws, WS_CLOSE_AUTHORIZATION_REVOKED, WS_AUTHORIZATION_REVOKED_REASON);
+        }
+        return;
+      }
+      const authorizationExpiresAt = Date.now() + WS_AUTHORIZATION_LEASE_MS;
+
       // Reject tokens older than the TTL
       if (
         participant.ws_token_created_at === null ||
@@ -272,16 +307,7 @@ export class SessionConnectionAuthenticator {
         return;
       }
 
-      log.info("ws.connect", {
-        event: "ws.connect",
-        ws_type: "client",
-        outcome: "success",
-        participant_id: participant.id,
-        user_id: participant.user_id,
-        client_id: data.clientId,
-      });
-
-      // Build client info from participant data
+      const enrichment = await this.deps.snapshotReader.resolveSessionSnapshotEnrichment();
       const clientInfo: ClientInfo = {
         participantId: participant.id,
         userId: participant.canonical_user_id ?? participant.user_id,
@@ -290,15 +316,35 @@ export class SessionConnectionAuthenticator {
         status: "active",
         lastSeen: Date.now(),
         clientId: data.clientId,
+        authorizationExpiresAt,
         ws,
       };
 
-      const enrichment = await this.deps.snapshotReader.resolveSessionSnapshotEnrichment();
-      if (!this.completeClientSubscription(ws, clientInfo, enrichment)) {
-        wsManager.close(ws, 4009, "Session synchronization failed");
+      try {
+        const activated = await wsManager.activateClient(ws, clientInfo, () =>
+          this.completeClientSubscription(ws, clientInfo, enrichment)
+        );
+        if (!activated) {
+          wsManager.close(ws, 4009, "Session synchronization failed");
+          return;
+        }
+      } catch (error) {
+        log.error("Failed to activate synchronized WebSocket client", {
+          participant_id: participant.id,
+          user_id: participant.user_id,
+          error: error instanceof Error ? error : String(error),
+        });
+        wsManager.close(ws, WS_CLOSE_INTERNAL_ERROR, "Session activation failed");
         return;
       }
-
+      log.info("ws.connect", {
+        event: "ws.connect",
+        ws_type: "client",
+        outcome: "success",
+        participant_id: participant.id,
+        user_id: participant.user_id,
+        client_id: data.clientId,
+      });
       presenceService.sendPresence(ws);
       presenceService.broadcastPresence();
       this.deps.schedulePullRequestRefresh("open");
@@ -317,7 +363,7 @@ export class SessionConnectionAuthenticator {
     client: ClientInfo,
     enrichment: Parameters<SessionSnapshotReader["readSessionSnapshot"]>[0]
   ): boolean {
-    const { wsManager, snapshotReader, log } = this.deps;
+    const { wsManager, snapshotReader } = this.deps;
     const snapshot = snapshotReader.readSessionSnapshot(enrichment);
     if (!snapshot) return false;
 
@@ -337,36 +383,21 @@ export class SessionConnectionAuthenticator {
       return false;
     }
 
-    wsManager.setClient(ws, client);
-    const parsed = wsManager.classify(ws);
-    if (parsed.kind === "client" && parsed.wsId) {
-      wsManager.persistClientMapping(parsed.wsId, client.participantId, client.clientId);
-      log.debug("Stored ws_client_mapping", {
-        ws_id: parsed.wsId,
-        participant_id: client.participantId,
-      });
-    }
     return true;
   }
 
-  /**
-   * Get client info for a WebSocket, reconstructing from storage if needed after hibernation.
-   */
+  /** Return authorized client state, recovering an unexpired lease after hibernation. */
   getClientInfo(ws: WebSocket): ClientInfo | null {
     const { wsManager, log } = this.deps;
-    // 1. In-memory cache (manager)
-    const cached = wsManager.getClient(ws);
-    if (cached) return cached;
-
-    // 2. DB recovery (manager handles tag parsing + DB lookup)
-    const mapping = wsManager.recoverClientMapping(ws);
-    if (!mapping) {
+    const lookup = wsManager.lookupClient(ws);
+    if (lookup.kind === "cached") return lookup.client;
+    if (lookup.kind === "authorization_rejected") return null;
+    if (lookup.kind === "missing") {
       log.warn("No client mapping found after hibernation, closing WebSocket");
       wsManager.close(ws, 4002, "Session expired, please reconnect");
       return null;
     }
-
-    // 3. Build ClientInfo
+    const { mapping } = lookup;
     log.info("Recovered client info from DB", { user_id: mapping.user_id });
     const clientInfo: ClientInfo = {
       participantId: mapping.participant_id,
@@ -376,10 +407,10 @@ export class SessionConnectionAuthenticator {
       status: "active",
       lastSeen: Date.now(),
       clientId: mapping.client_id || `client-${Date.now()}`,
+      authorizationExpiresAt: mapping.authorization_expires_at,
       ws,
     };
 
-    // 4. Re-cache
     wsManager.setClient(ws, clientInfo);
     return clientInfo;
   }
