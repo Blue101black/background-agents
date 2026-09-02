@@ -4,9 +4,10 @@ New features, integrations, and notable improvements to Open-Inspect — newest 
 
 ## September 2, 2026
 
-**Claude Fable 5.1.** Adds `claude-fable-5-1` to the model picker and integrations, with adaptive
-thinking and reasoning efforts from low through max. Linear issues can select it with the
-`model:fable-5-1` label.
+**Claude Fable 5.1.** Adds `claude-fable-5-1` to the model catalog, with adaptive thinking and
+reasoning efforts from low through max. Linear issues can select it with the `model:fable-5-1`
+label. Deployments that have already saved model preferences keep their saved set, so enable it in
+**Settings > Models** for it to appear in the session and automation pickers.
 
 ## September 1, 2026
 
