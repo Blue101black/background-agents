@@ -1,5 +1,5 @@
 /**
- * Test-only builder for service-authenticated router requests.
+ * Test-only builders for router requests.
  *
  * sig1 binds method, URL, and body, so every request is signed individually
  * — there is no reusable Authorization header. Env fixtures must bind the
@@ -9,18 +9,23 @@
 import { buildServiceAuthHeaders, type ServiceName } from "@open-inspect/shared/service-auth";
 import type { BackgroundTasks } from "./platform-ports";
 import { createTestBackgroundTasks } from "./background-tasks.test-support";
-import {
-  createControlPlaneHttpHandler,
-  handleControlPlaneHttp,
-  type ControlPlaneHttpHandler,
-} from "./routing/hono-app";
-import type { Route } from "./routes/shared";
+import { cloudflareHost, createControlPlaneApp } from "./routing/hono-app";
+import { routes } from "./routes/catalog";
+import type { Route, RouteParams } from "./routes/shared";
 import type { Env } from "./types";
 
 // The single contract-faithful double lives in background-tasks.test-support;
 // this shared instance's recordings are unused by the router suites.
 export const TEST_BACKGROUND_TASK_CONTEXT: BackgroundTasks = createTestBackgroundTasks();
 
+/** Request handler signature used by unit fixtures that provide the platform-neutral port. */
+export type TestRequestHandler = (
+  request: Request,
+  env: Env,
+  backgroundTasks: BackgroundTasks
+) => Promise<Response>;
+
+/** Present the fixture's port as the execution context the Cloudflare host expects. */
 function executionContextFromBackgroundTasks(tasks: BackgroundTasks): ExecutionContext {
   return {
     waitUntil(promise): void {
@@ -30,28 +35,38 @@ function executionContextFromBackgroundTasks(tasks: BackgroundTasks): ExecutionC
   } as ExecutionContext;
 }
 
-/** Request handler signature used by unit fixtures that provide the platform-neutral port. */
-export type TestRequestHandler = (
-  request: Request,
-  env: Env,
-  backgroundTasks: BackgroundTasks
-) => Promise<Response>;
-
-function adaptForTests(handler: ControlPlaneHttpHandler): TestRequestHandler {
+/**
+ * Test-only adapter over an explicit catalog, through the production host.
+ * Hono registers routes when the app is built, so fixtures that need
+ * synthetic routes construct their own handler instead of mutating the
+ * production catalog.
+ */
+export function createTestRequestHandler(catalog: readonly Route[]): TestRequestHandler {
+  const app = createControlPlaneApp(catalog, cloudflareHost);
   return (request, env, backgroundTasks) =>
-    handler(request, env, executionContextFromBackgroundTasks(backgroundTasks));
+    Promise.resolve(app.fetch(request, env, executionContextFromBackgroundTasks(backgroundTasks)));
 }
 
 /** Test-only adapter over the production catalog. */
-export const handleRequest: TestRequestHandler = adaptForTests(handleControlPlaneHttp);
+export const handleRequest: TestRequestHandler = createTestRequestHandler(routes);
 
-/**
- * Test-only adapter over an explicit catalog. Hono registers routes when the
- * app is built, so fixtures that need synthetic routes construct their own
- * handler instead of mutating the production catalog.
- */
-export function createTestRequestHandler(catalog: readonly Route[]): TestRequestHandler {
-  return adaptForTests(createControlPlaneHttpHandler(catalog));
+/** Compile a catalog path into the legacy raw-path matcher, for handler-level fixtures. */
+export function routePathPattern(path: string): RegExp {
+  return new RegExp(`^${path.replace(/:(\w+)/g, "(?<$1>[^/]+)")}$`);
+}
+
+/** Select the catalog route for a concrete path and rebuild what the adapter hands its handler. */
+export function matchRoute(
+  catalog: readonly Route[],
+  method: string,
+  path: string
+): { route: Route; match: RegExpMatchArray; params: RouteParams } | undefined {
+  for (const route of catalog) {
+    if (route.method !== method) continue;
+    const match = path.match(routePathPattern(route.path));
+    if (match) return { route, match, params: { ...match.groups } };
+  }
+  return undefined;
 }
 
 /** Per-service secrets for unit-test env fixtures, mirrored by signedServiceRequest. */
