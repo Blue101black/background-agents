@@ -120,19 +120,25 @@ export function applySessionReadState(
   if (!data) return data;
   return {
     ...data,
-    sessions: data.sessions.map((session) => {
-      if (session.id !== sessionId) return session;
-      if (!readState) return session;
-      const currentMessageId = session.readState?.latestMessageId;
-      if (currentMessageId !== undefined && currentMessageId !== readState.latestMessageId) {
-        return session;
-      }
-      return {
-        ...session,
-        readState,
-      };
-    }),
+    sessions: data.sessions.map((session) =>
+      applySessionReadStateToItem(session, sessionId, readState)
+    ),
   };
+}
+
+export function applySessionReadStateToItem<T extends { id: string; readState?: SessionReadState }>(
+  session: T,
+  sessionId: string,
+  readState: SessionReadState | undefined
+): T {
+  if (session.id !== sessionId || !readState) return session;
+  // Message IDs are not orderable, so a cached row holding a different message
+  // is left alone: it may already reflect a newer terminal message. A row with
+  // no terminal message yet has nothing newer to protect.
+  const currentMessageId = session.readState?.latestMessageId;
+  if (currentMessageId != null && currentMessageId !== readState.latestMessageId) return session;
+  if (session.readState?.unread === false && readState.unread) return session;
+  return { ...session, readState };
 }
 
 export function removeSessionFromList(sessions: SessionListItem[], sessionId: string) {
