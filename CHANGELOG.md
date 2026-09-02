@@ -2,6 +2,12 @@
 
 New features, integrations, and notable improvements to Open-Inspect — newest first.
 
+## September 2, 2026
+
+**Claude Fable 5.1.** Adds `claude-fable-5-1` to the model picker and integrations, with adaptive
+thinking and reasoning efforts from low through max. Linear issues can select it with the
+`model:fable-5-1` label.
+
 ## September 1, 2026
 
 **Workspace audit log.** Owners, Administrators, and authorized custom roles can review paginated
