@@ -130,7 +130,7 @@ export const MODEL_CATALOG = [
         description: "Latest Fable, adaptive thinking",
         reasoning: {
           efforts: ["low", "medium", "high", "xhigh", "max"],
-          default: "high",
+          default: "medium",
         },
       },
     ],
