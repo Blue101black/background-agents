@@ -1063,6 +1063,6 @@ describe("isSnapshotRuntimeCompatible", () => {
   it("fails closed on missing or unparseable versions", () => {
     expect(isSnapshotRuntimeCompatible(null)).toBe(false);
     expect(isSnapshotRuntimeCompatible("")).toBe(false);
-    expect(isSnapshotRuntimeCompatible("daytona-v6-vnc")).toBe(false);
+    expect(isSnapshotRuntimeCompatible("daytona-v7-vnc")).toBe(false);
   });
 });

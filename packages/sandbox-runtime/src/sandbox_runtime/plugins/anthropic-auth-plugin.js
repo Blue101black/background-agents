@@ -9,10 +9,14 @@ import { createProviderTokenBroker } from "./provider-token-broker.js";
 import { createHash } from "node:crypto";
 
 const OAUTH_SENTINEL = "managed-by-control-plane";
-const CLAUDE_USER_AGENT = "claude-cli/2.1.87 (external, cli)";
+// The subscription API gates newer models on the reported client version, so this
+// must stay at or above the highest floor any catalog model requires. Claude Fable
+// 5.1 refuses anything below 2.1.251. Bump it when the API rejects a newly added
+// model with a "does not support this model" error.
+const CLAUDE_VERSION = "2.1.251";
+const CLAUDE_USER_AGENT = `claude-cli/${CLAUDE_VERSION} (external, cli)`;
 const REQUIRED_BETAS = ["oauth-2025-04-20", "interleaved-thinking-2025-05-14"];
 const CLAUDE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
-const CLAUDE_VERSION = "2.1.87";
 const BILLING_SALT = "59cf53e54c78";
 const BILLING_POSITIONS = [4, 7, 20];
 const TOOL_PREFIX = "mcp_";
@@ -22,7 +26,7 @@ const tokenBroker = createProviderTokenBroker({
 });
 
 function isManagedOAuth(auth) {
-  return auth.type === "oauth" && auth.refresh === OAUTH_SENTINEL;
+  return auth?.type === "oauth" && auth.refresh === OAUTH_SENTINEL;
 }
 
 function mergeHeaders(requestInput, init) {
@@ -180,16 +184,27 @@ function rewriteResponse(response) {
 }
 
 export const AnthropicAuthProxy = async () => ({
+  provider: {
+    id: "anthropic",
+    async models(provider, { auth }) {
+      if (!isManagedOAuth(auth)) return provider.models;
+      return Object.fromEntries(
+        Object.entries(provider.models).map(([id, model]) => [
+          id,
+          {
+            ...model,
+            cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+          },
+        ])
+      );
+    },
+  },
   auth: {
     provider: "anthropic",
     methods: [],
-    async loader(getAuth, provider) {
+    async loader(getAuth) {
       const auth = await getAuth();
       if (!isManagedOAuth(auth)) return {};
-
-      for (const model of Object.values(provider.models)) {
-        model.cost = { input: 0, output: 0, cache: { read: 0, write: 0 } };
-      }
 
       return {
         apiKey: "",

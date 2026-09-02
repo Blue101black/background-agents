@@ -40,13 +40,22 @@ test("rewrites managed OAuth requests without losing Request semantics", async (
     opus: { cost: { input: 5, output: 25 } },
   };
   const auth = { type: "oauth", refresh: "managed-by-control-plane" };
-  const loaded = await plugin.auth.loader(async () => auth, { models });
-  assert.deepEqual(models.sonnet.cost, {
+  const managedModels = await plugin.provider.models({ models }, { auth });
+  assert.deepEqual(managedModels.sonnet.cost, {
     input: 0,
     output: 0,
     cache: { read: 0, write: 0 },
   });
-  assert.deepEqual(models.opus.cost, models.sonnet.cost);
+  assert.deepEqual(managedModels.opus.cost, managedModels.sonnet.cost);
+  assert.deepEqual(models.sonnet.cost, { input: 3, output: 15 });
+
+  const apiModels = await plugin.provider.models(
+    { models },
+    { auth: { type: "api", key: "anthropic-key" } }
+  );
+  assert.equal(apiModels, models);
+
+  const loaded = await plugin.auth.loader(async () => auth);
 
   const request = new Request("https://api.anthropic.com/v1/messages?existing=1", {
     method: "POST",
@@ -87,7 +96,7 @@ test("rewrites managed OAuth requests without losing Request semantics", async (
   const headers = new Headers(providerCall.init.headers);
   assert.equal(headers.get("authorization"), "Bearer anthropic-access");
   assert.equal(headers.get("x-api-key"), null);
-  assert.equal(headers.get("user-agent"), "claude-cli/2.1.87 (external, cli)");
+  assert.equal(headers.get("user-agent"), "claude-cli/2.1.251 (external, cli)");
   assert.equal(headers.get("x-precedence"), "init");
   assert.deepEqual(headers.get("anthropic-beta").split(","), [
     "init-beta",
