@@ -20,6 +20,7 @@ const CLAUDE_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Age
 const BILLING_SALT = "59cf53e54c78";
 const BILLING_POSITIONS = [4, 7, 20];
 const TOOL_PREFIX = "mcp_";
+const ACCOUNT_LIMIT_MESSAGE = "This request would exceed your account's rate limit";
 const tokenBroker = createProviderTokenBroker({
   provider: "anthropic",
   providerLabel: "Anthropic",
@@ -183,6 +184,21 @@ function rewriteResponse(response) {
   });
 }
 
+async function makeAccountLimitNonRetryable(response) {
+  if (response.status !== 429) return response;
+
+  const body = await response.clone().text();
+  if (!body.includes(ACCOUNT_LIMIT_MESSAGE)) return response;
+
+  // AI SDK retries every 429. Subscription account limits cannot recover within
+  // this prompt, so expose the provider error as terminal instead of retrying forever.
+  return new Response(response.body, {
+    status: 400,
+    statusText: "Account limit reached",
+    headers: response.headers,
+  });
+}
+
 export const AnthropicAuthProxy = async () => ({
   provider: {
     id: "anthropic",
@@ -235,7 +251,8 @@ export const AnthropicAuthProxy = async () => ({
           const { accessToken } = await tokenBroker.getAccessToken();
           headers.set("authorization", `Bearer ${accessToken}`);
           const providerResponse = await fetch(rewrittenInput, { ...init, headers, body });
-          return rewriteResponse(providerResponse);
+          const classifiedResponse = await makeAccountLimitNonRetryable(providerResponse);
+          return rewriteResponse(classifiedResponse);
         },
       };
     },

@@ -114,3 +114,62 @@ test("rewrites managed OAuth requests without losing Request semantics", async (
   assert.equal(body.tools[0].name, "mcp_Read");
   assert.equal(await response.text(), 'data: {"name":"read"}\n\n');
 });
+
+async function loadManagedFetchWithResponse(responseBody, status) {
+  process.env.CONTROL_PLANE_URL = "https://control.test";
+  process.env.SANDBOX_AUTH_TOKEN = "sandbox-token";
+  process.env.SESSION_CONFIG = JSON.stringify({ sessionId: "session-1" });
+
+  globalThis.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.includes("/provider-auth/anthropic/access-token")) {
+      return Response.json({ accessToken: "anthropic-access", expiresIn: 3600 });
+    }
+    return new Response(responseBody, { status });
+  };
+
+  const plugin = await AnthropicAuthProxy();
+  return plugin.auth.loader(async () => ({
+    type: "oauth",
+    refresh: "managed-by-control-plane",
+  }));
+}
+
+test("makes Anthropic subscription account limits non-retryable", async () => {
+  const errorBody = JSON.stringify({
+    type: "error",
+    error: {
+      type: "rate_limit_error",
+      message: "This request would exceed your account's rate limit. Please try again later.",
+    },
+  });
+  const loaded = await loadManagedFetchWithResponse(errorBody, 429);
+
+  const response = await loaded.fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    body: JSON.stringify({ messages: [{ role: "user", content: "continue" }] }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(response.statusText, "Account limit reached");
+  assert.equal(await response.text(), errorBody);
+});
+
+test("leaves transient Anthropic rate limits retryable", async () => {
+  const errorBody = JSON.stringify({
+    type: "error",
+    error: {
+      type: "rate_limit_error",
+      message: "Rate limit exceeded. Please retry shortly.",
+    },
+  });
+  const loaded = await loadManagedFetchWithResponse(errorBody, 429);
+
+  const response = await loaded.fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    body: JSON.stringify({ messages: [{ role: "user", content: "continue" }] }),
+  });
+
+  assert.equal(response.status, 429);
+  assert.equal(await response.text(), errorBody);
+});
