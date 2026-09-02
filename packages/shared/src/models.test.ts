@@ -283,7 +283,7 @@ describe("model utilities", () => {
     expect(getDefaultReasoningEffort("anthropic/claude-sonnet-5")).toBe("high");
     expect(getDefaultReasoningEffort("anthropic/claude-opus-5")).toBe("high");
     expect(getDefaultReasoningEffort("anthropic/claude-fable-5")).toBe("high");
-    expect(getDefaultReasoningEffort("anthropic/claude-fable-5-1")).toBe("high");
+    expect(getDefaultReasoningEffort("anthropic/claude-fable-5-1")).toBe("medium");
     expect(getDefaultReasoningEffort("openai/gpt-5.3-codex")).toBe("high");
     expect(getDefaultReasoningEffort("openai/gpt-5.5")).toBeUndefined();
     expect(getDefaultReasoningEffort("openai/gpt-5.6-sol")).toBe("medium");
