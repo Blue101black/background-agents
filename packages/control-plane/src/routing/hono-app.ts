@@ -1,6 +1,7 @@
 /** Hono application for ordinary control-plane HTTP requests. */
 
 import { Hono, type Handler } from "hono";
+import type { RouterRoute } from "hono/types";
 import { TrieRouter } from "hono/router/trie-router";
 import {
   auditRouteAuthorizationDecision,
@@ -11,14 +12,25 @@ import { createRequestContext } from "../http/create-request-context";
 import type { RequestContext } from "../http/request-context";
 import { error, HttpError } from "../http/responses";
 import { createLogger } from "../logger";
-import { routes } from "../routes/catalog";
+import { catalog } from "../routes/catalog";
 import type { Route, RouteParams } from "../routes/shared";
 import type { Env } from "../types";
 import { admit } from "./admit";
-import type { ControlPlaneHonoEnv, ControlPlaneHost, PlatformExecutionContext } from "./hono-env";
+import type {
+  ControlPlaneHonoEnv,
+  ControlPlaneHost,
+  PlatformExecutionContext,
+  RouteCatalogEntry,
+} from "./hono-env";
 import { finalizeRouteResponse, logRequest, withCorsAndTraceHeaders } from "./request-lifecycle";
 
-export type { ControlPlaneHonoEnv, ControlPlaneHost, PlatformExecutionContext } from "./hono-env";
+export type {
+  ControlPlaneHonoEnv,
+  ControlPlaneHost,
+  PlatformExecutionContext,
+  RouteCatalogEntry,
+  RouteModule,
+} from "./hono-env";
 
 /** Ordinary HTTP entrypoint signature shared by the Worker and test adapters. */
 export type ControlPlaneHttpHandler = (
@@ -36,15 +48,52 @@ const logger = createLogger("router");
  */
 const ROUTE_PATH_GRAMMAR = /^(\/([A-Za-z0-9_-]+|:\w+))+$/;
 
-function assertRoutePath(route: Route): void {
-  if (!ROUTE_PATH_GRAMMAR.test(route.path)) {
-    throw new Error(`Route path is outside the supported grammar: ${route.method} ${route.path}`);
+function assertRoutePath(method: string, path: string): void {
+  if (!ROUTE_PATH_GRAMMAR.test(path)) {
+    throw new Error(`Route path is outside the supported grammar: ${method} ${path}`);
   }
-  const names = route.path.split("/").filter((segment) => segment.startsWith(":"));
+  const names = path.split("/").filter((segment) => segment.startsWith(":"));
   const duplicate = names.find((name, index) => names.indexOf(name) !== index);
   if (duplicate) {
-    throw new Error(`Route declares parameter ${duplicate} twice: ${route.method} ${route.path}`);
+    throw new Error(`Route declares parameter ${duplicate} twice: ${method} ${path}`);
   }
+}
+
+/**
+ * Refuse a module unless every route it registers begins with `admit()`.
+ *
+ * Hono runs a route's handlers in registration order and stops at the first
+ * one that answers, so a handler registered ahead of the policy, or with no
+ * policy at all, would run its side effects before the lifecycle's default
+ * deny could replace the response. Module-level middleware (`app.use`) is
+ * refused for the same reason: nothing in a module runs before admission.
+ */
+function assertModuleAdmits(module: Hono<ControlPlaneHonoEnv>): void {
+  const first = new Map<string, RouterRoute>();
+  for (const route of module.routes) {
+    if (route.method === "ALL") {
+      throw new Error(`Module registers middleware outside admit(): ${route.path}`);
+    }
+    const identity = `${route.method} ${route.path}`;
+    if (!first.has(identity)) first.set(identity, route);
+  }
+  for (const [identity, route] of first) {
+    if (!("policy" in route.handler)) {
+      throw new Error(`Module route does not begin with admit(): ${identity}`);
+    }
+    assertRoutePath(route.method, route.path);
+  }
+}
+
+/** Mount a module or register a legacy route, refusing either before it can serve a request. */
+function register(app: Hono<ControlPlaneHonoEnv>, entry: RouteCatalogEntry): void {
+  if (entry instanceof Hono) {
+    assertModuleAdmits(entry);
+    app.route("/", entry);
+    return;
+  }
+  assertRoutePath(entry.method, entry.path);
+  app.on(entry.method, entry.path, admit(entry), legacy(entry));
 }
 
 /** The execution context the platform passed to `app.fetch`, if any. */
@@ -105,11 +154,9 @@ function replaceResponse(
  * handler that answers without admission having run is refused.
  */
 export function createControlPlaneApp(
-  catalog: readonly Route[],
+  entries: readonly RouteCatalogEntry[],
   host: ControlPlaneHost
 ): Hono<ControlPlaneHonoEnv> {
-  for (const route of catalog) assertRoutePath(route);
-
   const app = new Hono<ControlPlaneHonoEnv>({
     strict: true,
     getPath: (request) => new URL(request.url).pathname,
@@ -217,9 +264,7 @@ export function createControlPlaneApp(
     });
   });
 
-  for (const route of catalog) {
-    app.on(route.method, route.path, admit(route), legacy(route));
-  }
+  for (const entry of entries) register(app, entry);
 
   app.notFound((c) => {
     c.set("admissionExempt", true);
@@ -267,11 +312,13 @@ export const cloudflareHost: ControlPlaneHost = {
 };
 
 /** Build the Worker's ordinary HTTP entrypoint over a route catalog. */
-export function createControlPlaneHttpHandler(catalog: readonly Route[]): ControlPlaneHttpHandler {
-  const app = createControlPlaneApp(catalog, cloudflareHost);
+export function createControlPlaneHttpHandler(
+  entries: readonly RouteCatalogEntry[]
+): ControlPlaneHttpHandler {
+  const app = createControlPlaneApp(entries, cloudflareHost);
   return (request, env, executionCtx) => Promise.resolve(app.fetch(request, env, executionCtx));
 }
 
 /** Production entrypoint over the canonical route catalog. */
 export const handleControlPlaneHttp: ControlPlaneHttpHandler =
-  createControlPlaneHttpHandler(routes);
+  createControlPlaneHttpHandler(catalog);
