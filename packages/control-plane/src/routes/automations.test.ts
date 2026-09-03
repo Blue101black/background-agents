@@ -1,23 +1,37 @@
 /**
- * Unit tests for automation CRUD route handlers.
+ * Unit tests for automation CRUD routes.
  *
  * Tests run in Node (not workerd) with mocked AutomationStore and source
- * control. Handler functions are extracted from the exported automationRoutes
- * array and invoked directly, bypassing the auth middleware.
+ * control. Requests dispatch through the production `automationRoutes`
+ * module, so admission (including the automation ownership requirement)
+ * runs; authentication is mocked to supply the principal.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type * as AuthenticateModule from "../auth/authenticate";
 import { automationRoutes } from "./automations";
-import { HttpError, resolveRepoOrError, type RequestContext } from "./shared";
+import { HttpError, resolveRepoOrError } from "./shared";
 import type { Principal } from "../auth/principal";
-import type { SqlDatabase } from "../db/sql-database";
+import type { SqlDatabase, SqlStatement } from "../db/sql-database";
 import type { Env } from "../types";
-import { routePathPattern, TEST_BACKGROUND_TASK_CONTEXT } from "../router.test-support";
+import {
+  authorizationDatabase,
+  createTestRequestHandler,
+  TEST_BACKGROUND_TASK_CONTEXT,
+  TEST_SERVICE_SECRETS,
+} from "../router.test-support";
 import {
   AutomationExecutionUnauthorizedError,
   AutomationTriggerBlockedError,
 } from "../scheduler/scheduler";
 import { PERMISSION_IDS, type PermissionId } from "@open-inspect/shared/rbac";
+
+const mocks = vi.hoisted(() => ({ authenticate: vi.fn() }));
+
+vi.mock("../auth/authenticate", async (importOriginal) => ({
+  ...(await importOriginal<typeof AuthenticateModule>()),
+  authenticate: mocks.authenticate,
+}));
 
 const mockProviderAdapterGet = vi.hoisted(() => vi.fn());
 const mockResolveGitHubCredentialAuthority = vi.hoisted(() => vi.fn());
@@ -40,6 +54,7 @@ vi.mock("../session/identity", () => ({
 const mockStore = {
   list: vi.fn(),
   getById: vi.fn(),
+  resolveCanonicalOwner: vi.fn(async (automation: unknown) => automation),
   update: vi.fn(),
   softDelete: vi.fn(),
   pause: vi.fn(),
@@ -169,13 +184,33 @@ vi.mock("./shared", async (importOriginal) => {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function createEnv(): Env {
+/**
+ * The workspace database as admission and the handlers see it: admission's
+ * lookups are answered by test support, every other statement goes to a
+ * statement spy, and `batch` is the shared spy.
+ */
+function createDatabase(permissions: readonly PermissionId[]): SqlDatabase {
+  const statement = {
+    bind: vi.fn(() => statement),
+    first: vi.fn(async () => ({ satisfied: 1 })),
+    all: vi.fn(async () => ({ results: [] })),
+  };
+  return authorizationDatabase({
+    permissions: permissions.length === PERMISSION_IDS.length ? undefined : permissions,
+    statement: () => statement as unknown as SqlStatement,
+    batch: mockBatch,
+  });
+}
+
+function createEnv(permissions: readonly PermissionId[] = PERMISSION_IDS): Env {
   return {
-    DB: { batch: mockBatch } as unknown as D1Database,
+    ...TEST_SERVICE_SECRETS,
+    SCM_PROVIDER: "github",
+    DB: createDatabase(permissions),
     SESSION: {} as DurableObjectNamespace,
     DEPLOYMENT_NAME: "test",
     TOKEN_ENCRYPTION_KEY: "test-key",
-  } as Env;
+  } as unknown as Env;
 }
 
 const USER_PRINCIPAL: Principal = {
@@ -194,39 +229,7 @@ const SLACK_BOT_PRINCIPAL: Principal = {
   },
 };
 
-function createCtx(
-  principal: Principal = USER_PRINCIPAL,
-  permissions: readonly PermissionId[] = PERMISSION_IDS
-): RequestContext {
-  const statement = {
-    bind: vi.fn(() => statement),
-    first: vi.fn(async () => ({ satisfied: 1 })),
-    all: vi.fn(async () => ({ results: [] })),
-  };
-  return {
-    trace_id: "trace-1",
-    request_id: "req-1",
-    principal,
-    ...(principal.kind === "user"
-      ? {
-          authorization: {
-            userId: principal.userId,
-            suspendedAt: null,
-            role: { id: "role_builtin_owner", key: "owner" as const, name: "Owner" },
-            permissions: [...permissions],
-          },
-        }
-      : {}),
-    db: { batch: mockBatch, prepare: vi.fn(() => statement) } as unknown as SqlDatabase,
-    executionCtx: TEST_BACKGROUND_TASK_CONTEXT,
-    metrics: {
-      d1Queries: [],
-      spans: {},
-      time: async <T>(_name: string, fn: () => Promise<T>) => fn(),
-      summarize: () => ({}),
-    },
-  };
-}
+const handleRequest = createTestRequestHandler([automationRoutes]);
 
 async function callRoute(
   method: string,
@@ -238,11 +241,6 @@ async function callRoute(
     permissions?: readonly PermissionId[];
   }
 ): Promise<Response> {
-  const route = automationRoutes.find(
-    (candidate) => candidate.method === method && routePathPattern(candidate.path).test(path)
-  );
-  if (!route) throw new Error(`No route found for ${method} ${path}`);
-  const match = path.match(routePathPattern(route.path))!;
   const url = new URL(`https://test.local${path}`);
   if (options?.query) {
     for (const [k, v] of Object.entries(options.query)) {
@@ -256,20 +254,13 @@ async function callRoute(
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(options.body);
   }
-  const ctx = createCtx(options?.principal, options?.permissions);
-  const automationRequirement =
-    route.authorization.kind === "active-user"
-      ? route.authorization.allOf.find((requirement) => requirement.kind === "automation")
-      : undefined;
-  if (automationRequirement) {
-    const automation = await mockStore.getById(
-      match.groups?.[automationRequirement.automationIdParam]
-    );
-    if (!automation)
-      return new Response(JSON.stringify({ error: "Automation not found" }), { status: 404 });
-    ctx.automationAdmission = { automation };
-  }
-  return route.handler(new Request(url, init), createEnv(), match, ctx);
+  const principal = options?.principal ?? USER_PRINCIPAL;
+  mocks.authenticate.mockImplementation(async (request: Request) => ({ principal, request }));
+  return handleRequest(
+    new Request(url, init),
+    createEnv(options?.permissions),
+    TEST_BACKGROUND_TASK_CONTEXT
+  );
 }
 
 // ─── Sample data ────────────────────────────────────────────────────────────
@@ -301,6 +292,9 @@ describe("automation route handlers", () => {
     vi.clearAllMocks();
     // Defaults every test can override; re-set here so per-test overrides
     // (mockClear keeps implementations) cannot leak across tests.
+    // Admission resolves the automation for every manage route, so the
+    // lookup must not depend on what an earlier test left behind.
+    mockStore.getById.mockResolvedValue(sampleRow);
     mockStore.getRepositoriesForAutomation.mockResolvedValue([]);
     mockStore.getRepositoriesForAutomationIds.mockResolvedValue(new Map());
     mockStore.getEnvironmentsForAutomation.mockResolvedValue([]);
@@ -587,19 +581,19 @@ describe("automation route handlers", () => {
         };
       });
 
-      await expect(
-        callRoute("POST", "/automations", {
-          body: {
-            ...validBody,
-            repositories: [
-              { repoOwner: "acme", repoName: "web-app" },
-              { repoOwner: "acme", repoName: "api" },
-            ],
-          },
-        })
-      ).rejects.toMatchObject({
-        status: 404,
-        message: "Repository is not installed for the GitHub App",
+      const res = await callRoute("POST", "/automations", {
+        body: {
+          ...validBody,
+          repositories: [
+            { repoOwner: "acme", repoName: "web-app" },
+            { repoOwner: "acme", repoName: "api" },
+          ],
+        },
+      });
+
+      expect(res.status).toBe(404);
+      await expect(res.json()).resolves.toEqual({
+        error: "Repository is not installed for the GitHub App",
       });
       expect(mockStore.bindAutomationInsert).not.toHaveBeenCalled();
       expect(mockStore.bindRepositoryInserts).not.toHaveBeenCalled();
@@ -615,17 +609,18 @@ describe("automation route handlers", () => {
           })
       );
 
-      await expect(
-        callRoute("POST", "/automations", {
-          body: {
-            ...validBody,
-            repositories: [
-              { repoOwner: "acme", repoName: "first" },
-              { repoOwner: "acme", repoName: "second" },
-            ],
-          },
-        })
-      ).rejects.toMatchObject({ message: "failed first" });
+      const res = await callRoute("POST", "/automations", {
+        body: {
+          ...validBody,
+          repositories: [
+            { repoOwner: "acme", repoName: "first" },
+            { repoOwner: "acme", repoName: "second" },
+          ],
+        },
+      });
+
+      expect(res.status).toBe(404);
+      await expect(res.json()).resolves.toEqual({ error: "failed first" });
       expect(mockBatch).not.toHaveBeenCalled();
     });
 
@@ -931,7 +926,7 @@ describe("automation route handlers", () => {
       );
     });
 
-    it("fails closed when a bot actor bypasses admission", async () => {
+    it("refuses a bot actor at admission before any identity is resolved", async () => {
       mockStore.getById.mockResolvedValue(sampleRow);
 
       const res = await callRoute("POST", "/automations", {
@@ -944,8 +939,11 @@ describe("automation route handlers", () => {
         principal: SLACK_BOT_PRINCIPAL,
       });
 
-      expect(res.status).toBe(500);
-      await expect(res.json()).resolves.toEqual({ error: "Failed to resolve session identity" });
+      expect(res.status).toBe(403);
+      await expect(res.json()).resolves.toEqual({
+        error: "Forbidden",
+        code: "service_capability_required",
+      });
       expect(mockUserStore.resolveOrCreateUser).not.toHaveBeenCalled();
       expect(mockStore.bindAutomationInsert).not.toHaveBeenCalled();
     });
