@@ -8,7 +8,7 @@ import {
   TEST_SERVICE_SECRETS,
 } from "../router.test-support";
 import type { Env } from "../types";
-import { analyticsRoutes } from "./analytics";
+import { analyticsRoutes, DEFAULT_ANALYTICS_DAYS } from "./analytics";
 
 const FIXED_NOW = 1_700_000_000_000;
 
@@ -114,7 +114,7 @@ describe("analytics route handlers", () => {
       const response = await callRoute("GET", "/analytics/summary");
       expect(response.status).toBe(200);
       expect(mockStore.getSummary).toHaveBeenCalledWith({
-        startAt: FIXED_NOW - 30 * 24 * 60 * 60 * 1000,
+        startAt: FIXED_NOW - DEFAULT_ANALYTICS_DAYS * 24 * 60 * 60 * 1000,
         endAt: FIXED_NOW,
         spawnSources: HUMAN_SPAWN_SOURCES,
       });
@@ -175,6 +175,57 @@ describe("analytics route handlers", () => {
         },
         "repo"
       );
+    });
+  });
+
+  describe("query strings", () => {
+    it.each(["7", "14", "30", "90"])("accepts days=%s", async (days) => {
+      mockStore.getSummary.mockResolvedValue({ ok: true });
+
+      const response = await callRoute("GET", `/analytics/summary?days=${days}`);
+
+      expect(response.status).toBe(200);
+      expect(mockStore.getSummary).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startAt: FIXED_NOW - Number(days) * 24 * 60 * 60 * 1000,
+          endAt: FIXED_NOW,
+        })
+      );
+    });
+
+    it.each(["", "0", "8", "abc", "1e1"])("rejects days=%s", async (days) => {
+      const response = await callRoute("GET", `/analytics/summary?days=${days}`);
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "days must be one of: 7, 14, 30, 90",
+      });
+      expect(mockStore.getSummary).not.toHaveBeenCalled();
+    });
+
+    it("rejects a repeated days key", async () => {
+      const response = await callRoute("GET", "/analytics/summary?days=7&days=14");
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({ error: "Invalid days" });
+    });
+
+    it("rejects an empty or repeated by key", async () => {
+      const empty = await callRoute("GET", "/analytics/breakdown?days=30&by=");
+      expect(empty.status).toBe(400);
+      await expect(empty.json()).resolves.toEqual({ error: "by must be one of: user, repo" });
+
+      const repeated = await callRoute("GET", "/analytics/breakdown?days=30&by=user&by=repo");
+      expect(repeated.status).toBe(400);
+      await expect(repeated.json()).resolves.toEqual({ error: "Invalid by" });
+    });
+
+    it("reports days before by when both are invalid", async () => {
+      const response = await callRoute("GET", "/analytics/breakdown?days=1&by=nope");
+
+      await expect(response.json()).resolves.toEqual({
+        error: "days must be one of: 7, 14, 30, 90",
+      });
     });
   });
 
