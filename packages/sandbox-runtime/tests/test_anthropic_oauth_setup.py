@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from sandbox_runtime.entrypoint import SandboxSupervisor
+from sandbox_runtime.opencode_server import OpenCodeServer
+from tests.runtime_helpers import make_opencode_server
 
 
-def _make_supervisor() -> SandboxSupervisor:
+def _make_opencode_server() -> OpenCodeServer:
     with patch.dict(
         "os.environ",
         {
@@ -18,11 +19,11 @@ def _make_supervisor() -> SandboxSupervisor:
             "REPO_NAME": "app",
         },
     ):
-        return SandboxSupervisor()
+        return make_opencode_server()
 
 
 def test_auth_json_merges_anthropic_sentinel_with_existing_entries(tmp_path):
-    supervisor = _make_supervisor()
+    supervisor = _make_opencode_server()
     auth_file = tmp_path / ".local" / "share" / "opencode" / "auth.json"
     auth_file.parent.mkdir(parents=True)
     auth_file.write_text(json.dumps({"xai": {"type": "api", "key": "existing"}}))
@@ -64,7 +65,7 @@ def test_anthropic_plugin_uses_broker_without_local_refresh_credentials():
 
 
 async def test_start_opencode_deploys_anthropic_plugin_and_broker_once(tmp_path):
-    supervisor = _make_supervisor()
+    supervisor = _make_opencode_server()
     supervisor.workspace_path = tmp_path / "workspace"
     supervisor.workspace_path.mkdir()
     (supervisor.workspace_path / ".git").mkdir()
@@ -86,15 +87,16 @@ async def test_start_opencode_deploys_anthropic_plugin_and_broker_once(tmp_path)
             {"XAI_OAUTH_MANAGED": "1", "ANTHROPIC_OAUTH_MANAGED": "1"},
             clear=True,
         ),
-        patch("sandbox_runtime.entrypoint.Path") as mock_path,
-        patch("sandbox_runtime.entrypoint.shutil.copy") as mock_copy,
-        patch("sandbox_runtime.entrypoint.install_runtime_git_excludes") as mock_excludes,
+        patch("sandbox_runtime.opencode_server.Path") as mock_path,
+        patch("sandbox_runtime.opencode_server.shutil.copy") as mock_copy,
+        patch("sandbox_runtime.opencode_server.install_runtime_git_excludes") as mock_excludes,
         patch(
-            "sandbox_runtime.entrypoint.asyncio.create_subprocess_exec",
+            "sandbox_runtime.opencode_server.asyncio.create_subprocess_exec",
             AsyncMock(return_value=fake_proc),
         ),
         patch(
-            "sandbox_runtime.entrypoint.asyncio.create_task", side_effect=lambda coro: coro.close()
+            "sandbox_runtime.opencode_server.asyncio.create_task",
+            side_effect=lambda coro: coro.close(),
         ),
     ):
         mock_path.side_effect = lambda value: {
@@ -108,7 +110,7 @@ async def test_start_opencode_deploys_anthropic_plugin_and_broker_once(tmp_path)
         supervisor._install_bin_scripts = MagicMock()
         supervisor._wait_for_health = AsyncMock()
 
-        await supervisor.start_opencode()
+        await supervisor.start((), supervisor.workspace_path)
 
     destination = supervisor.workspace_path / ".opencode" / "plugins"
     assert mock_copy.call_args_list == [

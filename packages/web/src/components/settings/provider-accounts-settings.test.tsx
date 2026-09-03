@@ -13,7 +13,10 @@ import { ProviderAccountsSettings } from "./provider-accounts-settings";
 import { CHATGPT_DEVICE_AUTHORIZATION_SETTINGS_URL } from "./provider-device-authorization-dialog";
 
 expect.extend(matchers);
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const refresh = vi.fn();
 const runAction = vi.fn();
@@ -79,6 +82,10 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 describe("ProviderAccountsSettings", () => {
   beforeEach(() => {
+    vi.stubGlobal("crypto", {
+      getRandomValues: (bytes: Uint8Array) => bytes.fill(1),
+      subtle: { digest: async () => new Uint8Array(32).buffer },
+    });
     vi.clearAllMocks();
     refresh.mockResolvedValue(undefined);
     runAction.mockResolvedValue(undefined);

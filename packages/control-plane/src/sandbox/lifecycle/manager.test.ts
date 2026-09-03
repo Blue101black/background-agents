@@ -22,6 +22,7 @@ import {
 import type { ImageBuildSpawnRow } from "./image-selection";
 import { computeRepositoriesFingerprint } from "../../image-builds/fingerprint";
 import { COMPATIBLE_RUNTIME_VERSION } from "../../image-builds/test-helpers";
+import { MIN_COMPATIBLE_RUNTIME_VERSION } from "../../image-builds/model";
 import {
   SandboxProviderError,
   type SandboxProvider,
